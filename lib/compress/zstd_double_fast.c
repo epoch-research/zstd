@@ -772,10 +772,11 @@ _check_immediate_repeat:
                 goto _check_immediate_repeat;
             }
             /* In prose, try a locally known third repeat when the second
-             * repeat missed at this boundary. The original longer-match
-             * gate applies to the repeat run. Bound the offset before its
-             * candidate read, then require all eight bytes to match. */
-            if (tagged && (!swapTables && mls==6) && mLength >= 16 && ip <= ilimit) {
+             * repeat missed at this boundary. A normal match of at least
+             * eight bytes enables the check for this whole repeat run.
+             * Bound the offset before its candidate read, then require
+             * all eight bytes to match. */
+            if (tagged && (!swapTables && mls==6) && mLength >= 8 && ip <= ilimit) {
                 U32 const rOffset = offset_3;
                 if (UNLIKELY(rOffset > 0 && rOffset <= (U32)(ip-prefixLowest) &&
                     MEM_read64(ip-rOffset) == MEM_read64(ip))) {
