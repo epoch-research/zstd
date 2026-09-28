@@ -197,7 +197,8 @@ size_t ZSTD_compressBlock_doubleFast_noDict_generic(
     U32 currLong;
 
     /* how many positions to search before increasing step size */
-    const size_t kStepIncr = (tuned && swapTables) ? 112
+    const size_t kStepIncr = tagged ? 256
+                          : (tuned && swapTables) ? 112
                           : (size_t)1 << (tuned ? 7 : kSearchStrength);
     /* the position at which to increment the step size if no match is found */
     const BYTE* nextStep;
@@ -306,10 +307,10 @@ size_t ZSTD_compressBlock_doubleFast_noDict_generic(
                      * any increase in the offset's encoding cost. A byte that
                      * can be caught up backwards both extends the match and
                      * removes a literal, so credit it twice in this estimate.
-                     * Avoid recounting long candidates when the existing
-                     * match is already long. Binary data benefits from a
-                     * tighter limit than text. */
-                    if (tuned && (mLength <= (swapTables ? 16 : 32))) {
+                     * Avoid recounting already-long matches. Fingerprints
+                     * make the binary candidate check cheap enough to use
+                     * a larger limit; untagged binary keeps the tighter cap. */
+                    if (tuned && (mLength <= (swapTables ? (tagged ? 64 : 16) : 32))) {
                         idxl1 = ZSTD_dfastLoadLong(hashLong, hl1, tagged);
                         matchl1 = longBase + idxl1;
                         if (ZSTD_dfastValidLong(idxl1, (U32)(ip1-longBase), longLowestIndex, 1, tagged) && MEM_read64(matchl1) == MEM_read64(ip1)) {
@@ -458,15 +459,15 @@ _match_stored:
                 ZSTD_dfastSaveLong(hashLong, ZSTD_hashPtr(base+indexToInsert, hBitsL+(tagged ? ZSTD_DFAST_TAG_BITS : 0), 8), currLong+2, tagged);
                 ZSTD_dfastSaveShort(hashSmall, ZSTD_hashPtr(base+indexToInsert, hBitsS+(tagged ? ZSTD_DFAST_SHORT_TAG_BITS : 0), mls), currLong+2, tagged);
                 ZSTD_dfastSaveShort(hashSmall, ZSTD_hashPtr(ip-1, hBitsS+(tagged ? ZSTD_DFAST_SHORT_TAG_BITS : 0), mls), (U32)(ip-1-longBase), tagged);
-                /* Spread the extra insertions across longer text matches.
-                 * Shorter text matches retain denser front coverage. Binary
-                 * matches use the additional positions only beyond eight
-                 * bytes. All inserted positions precede the next search,
-                 * and the enclosing ilimit check makes the hash reads safe. */
+                /* Spread existing insertions across longer text and tagged
+                 * binary matches. Short matches retain dense front coverage;
+                 * untagged binary retains its original insertion policy.
+                 * All positions precede the next search, and the enclosing
+                 * ilimit check makes the hash reads safe. */
                 if (tuned) {
-                    /* Five-byte source keys find more short matches; keep
-                     * denser front coverage a little longer for those. */
-                    if (!swapTables && (size_t)(ip-(base+curr)) >= (mls == 5 ? 16 : 12)) {
+                    /* Without fingerprints, keep dense front coverage a
+                     * little longer for the five-byte text-key fallback. */
+                    if ((!swapTables || tagged) && (size_t)(ip-(base+curr)) >= ((!tagged && mls == 5) ? 16 : 12)) {
                         ZSTD_dfastSaveLong(hashLong, ZSTD_hashPtr(base+curr+4, hBitsL+(tagged ? ZSTD_DFAST_TAG_BITS : 0), 8), currLong+4, tagged);
                         {   size_t const hl = ZSTD_hashPtr(base+curr+8, hBitsL+(tagged ? ZSTD_DFAST_TAG_BITS : 0), 8);
                             size_t const hs = ZSTD_hashPtr(base+curr+8, hBitsS+(tagged ? ZSTD_DFAST_SHORT_TAG_BITS : 0), mls);
@@ -841,6 +842,17 @@ FORCE_NOINLINE size_t ZSTD_compressBlock_doubleFast_taggedSpecialLong(
     return ZSTD_compressBlock_doubleFast_noDict_generic(ms,ss,rep,src,size,5,17,16,0,1,1,1);
 }
 
+FORCE_NOINLINE size_t ZSTD_compressBlock_doubleFast_taggedBinary(
+        ZSTD_MatchState_t* ms, SeqStore_t* ss, U32 rep[ZSTD_REP_NUM],
+        void const* src, size_t size) {
+    return ZSTD_compressBlock_doubleFast_noDict_generic(ms,ss,rep,src,size,5,16,17,1,0,1,1);
+}
+FORCE_NOINLINE size_t ZSTD_compressBlock_doubleFast_taggedBinaryLong(
+        ZSTD_MatchState_t* ms, SeqStore_t* ss, U32 rep[ZSTD_REP_NUM],
+        void const* src, size_t size) {
+    return ZSTD_compressBlock_doubleFast_noDict_generic(ms,ss,rep,src,size,5,16,17,1,1,1,1);
+}
+
 size_t ZSTD_compressBlock_doubleFast(
         ZSTD_MatchState_t* ms, SeqStore_t* seqStore, U32 rep[ZSTD_REP_NUM],
         void const* src, size_t srcSize)
@@ -868,7 +880,7 @@ size_t ZSTD_compressBlock_doubleFast(
                 ms->dfastMode = (ms->dfastMode & ZSTD_DFAST_TAG_MASK) | (text*4 >= samples*3 ? ((ms->dfastMode & ZSTD_DFAST_TAG_PERMITTED) && syntax*64 >= samples ? 1 : 2) : 3);
             }
         }
-        if (ms->dfastMode == (ZSTD_DFAST_TAG_PERMITTED | 1) || ms->dfastMode == (ZSTD_DFAST_TAG_PERMITTED | 2)) {
+        if (ms->dfastMode == (ZSTD_DFAST_TAG_PERMITTED | 1) || ms->dfastMode == (ZSTD_DFAST_TAG_PERMITTED | 2) || ms->dfastMode == (ZSTD_DFAST_TAG_PERMITTED | 3)) {
             ZSTD_memset(ms->hashTable, 0, ((size_t)1 << ms->cParams.hashLog)*sizeof(U32));
             ZSTD_memset(ms->chainTable, 0, ((size_t)1 << ms->cParams.chainLog)*sizeof(U32));
             ms->dfastMode |= ZSTD_DFAST_TAG_ACTIVE;
@@ -882,6 +894,9 @@ size_t ZSTD_compressBlock_doubleFast(
             if ((ms->dfastMode & ZSTD_DFAST_TAG_ACTIVE) && mode == 1) result = longMode ?
                 ZSTD_compressBlock_doubleFast_taggedSpecialLong(ms,seqStore,rep,src,srcSize) :
                 ZSTD_compressBlock_doubleFast_taggedSpecial(ms,seqStore,rep,src,srcSize);
+            else if ((ms->dfastMode & ZSTD_DFAST_TAG_ACTIVE) && mode == 3) result = longMode ?
+                ZSTD_compressBlock_doubleFast_taggedBinaryLong(ms,seqStore,rep,src,srcSize) :
+                ZSTD_compressBlock_doubleFast_taggedBinary(ms,seqStore,rep,src,srcSize);
             else if (ms->dfastMode & ZSTD_DFAST_TAG_ACTIVE) result = longMode ?
                 ZSTD_compressBlock_doubleFast_taggedTextLong(ms,seqStore,rep,src,srcSize) :
                 ZSTD_compressBlock_doubleFast_taggedText(ms,seqStore,rep,src,srcSize);
