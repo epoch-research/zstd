@@ -275,7 +275,7 @@ static size_t ZSTD_refineSplitFast(const BYTE* src, size_t pos,
         const U16* ref, U16* hist, U32 k)
 {
     enum { span = CHUNKSIZE/2, priceUnset = -32640 };
-    U32 const samples = (CHUNKSIZE+41)/43;
+    U32 const samples = (CHUNKSIZE+29)/31;
     S16* const prices = (S16*)(hist + 4*256);
     int const constant = ZSTD_splitLog256(k*samples+256)
                        - ZSTD_splitLog256(samples+256);
@@ -287,8 +287,8 @@ static size_t ZSTD_refineSplitFast(const BYTE* src, size_t pos,
     assert(pos >= CHUNKSIZE && pos <= 128 KB-CHUNKSIZE);
     /* Signed 0x8080 is outside the range of any valid price. */
     ZSTD_memset(prices, 0x80, 256*sizeof(*prices));
-    for (n = 0; n*43 < 2*span; ++n) {
-        unsigned const symbol = p[n*43];
+    for (n = 0; n*31 < 2*span; ++n) {
+        unsigned const symbol = p[n*31];
         int price = prices[symbol];
         if (price == priceUnset) {
             U32 const current = hist[symbol] + hist[256+symbol]
@@ -302,20 +302,20 @@ static size_t ZSTD_refineSplitFast(const BYTE* src, size_t pos,
         }
         sum += price;
         if (sum < minimum) { minimum = sum; best = n+1; }
-        if (!seen && (n+1)*43 >= span) { original = sum; seen = 1; }
+        if (!seen && (n+1)*31 >= span) { original = sum; seen = 1; }
         if (seen && sum-minimum >= 8*256) { confirmed = 1; break; }
     }
     if (confirmed && original-minimum >= 4*256) {
         /* Midpoint between the last old and first new sample, rounded to
          * 64 bytes. Even at either end, leave at least 4 KiB in each block. */
-        size_t const delta = (best*43+11) & ~(size_t)63;
+        size_t const delta = (best*31+17) & ~(size_t)63;
         assert(delta <= 2*span);
         return pos-span+delta;
     }
     return pos;
 }
 
-/* The byte fingerprints at sampling rate 43 have fewer than 3072 samples
+/* The byte fingerprints at sampling rate 31 have fewer than 4352 samples
  * in a full block. 16-bit counters are sufficient, including the weighted
  * differences and their sum. Cancel the common nbEvents factor before
  * computing the distance; this gives the same decision as the full-width
@@ -335,31 +335,31 @@ ZSTD_splitBlock_fastChunks(const void* blockStart, size_t blockSize,
     U32 k=1;
     int penalty=THRESHOLD_PENALTY;
     /* Match recordFingerprint_generic's convention (floor, not ceil). */
-    const U32 events = (CHUNKSIZE-1)/43;
+    const U32 events = (CHUNKSIZE-1)/31;
     ZSTD_STATIC_ASSERT(HASHLENGTH == 2);
     ZSTD_STATIC_ASSERT(ZSTD_SLIPBLOCK_WORKSPACESIZE >= 6*256*sizeof(U16));
-    ZSTD_STATIC_ASSERT(2 * (128 KB / 43 + 128 KB / CHUNKSIZE) < 32768);
+    ZSTD_STATIC_ASSERT(2 * (128 KB / 31 + 128 KB / CHUNKSIZE) < 32768);
     assert(blockSize >= 16 KB && blockSize <= 128 KB);
     assert(wkspSize >= (4+2)*256*sizeof(U16));
     (void)wkspSize;
     ZSTD_memset(ref,0,256*sizeof(U16));
-    for (n=0; n<CHUNKSIZE-1; n+=43) ref[p[n]]++;
+    for (n=0; n<CHUNKSIZE-1; n+=31) ref[p[n]]++;
     for (pos=CHUNKSIZE; pos<=blockSize-CHUNKSIZE; pos+=CHUNKSIZE,++k) {
         U32 distance=0;
-        /* nbEvents >= THRESHOLD_PENALTY_RATE makes this rounded-up,
-         * cancelled threshold equivalent to the original comparison. */
-        U32 const threshold = (k*events*(THRESHOLD_BASE+(U32)penalty)
+        /* Round up after cancelling the common sample count. Denser
+         * fingerprints permit a tighter distance threshold. */
+        U32 const threshold = (k*events*(12+(U32)penalty)
                               + THRESHOLD_PENALTY_RATE-1) / THRESHOLD_PENALTY_RATE;
         const BYTE* const src=p+pos;
         size_t i;
         ZSTD_memset(hist,0,4*256*sizeof(U16));
-        for (n=0; n+4<=(CHUNKSIZE+41)/43; n+=4) {
-            hist[0*256 + src[(n+0)*43]]++;
-            hist[1*256 + src[(n+1)*43]]++;
-            hist[2*256 + src[(n+2)*43]]++;
-            hist[3*256 + src[(n+3)*43]]++;
+        for (n=0; n+4<=(CHUNKSIZE+29)/31; n+=4) {
+            hist[0*256 + src[(n+0)*31]]++;
+            hist[1*256 + src[(n+1)*31]]++;
+            hist[2*256 + src[(n+2)*31]]++;
+            hist[3*256 + src[(n+3)*31]]++;
         }
-        for (; n<(CHUNKSIZE+41)/43; ++n) hist[src[n*43]]++;
+        for (; n<(CHUNKSIZE+29)/31; ++n) hist[src[n*31]]++;
 #if defined(__SSE2__) && !defined(ZSTD_NO_INTRINSICS)
         {
         __m128i acc = _mm_setzero_si128();

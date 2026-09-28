@@ -150,6 +150,11 @@ size_t ZSTD_compressBlock_doubleFast_noDict_generic(
     U32 offset_1=rep[0], offset_2=rep[1];
     U32 offsetSaved1 = 0, offsetSaved2 = 0;
 
+    /* Keep the input word already read for hashing. Derive its four-byte
+     * prefixes without loading the same input again. On short text matches,
+     * also retain the candidate word for counting after the prefix check. */
+    U64 shortWord = 0;
+    U64 currentWord = 0;
     size_t mLength;
     U32 offset;
     U32 curr;
@@ -200,6 +205,7 @@ size_t ZSTD_compressBlock_doubleFast_noDict_generic(
             goto _cleanup;
         }
 
+        if (tuned && MEM_64bits()) currentWord = MEM_read64(ip);
         hl0 = ZSTD_hashPtr(ip, hBitsL, 8);
         idxl0 = hashLong[hl0];
         matchl0 = base + idxl0;
@@ -214,7 +220,7 @@ size_t ZSTD_compressBlock_doubleFast_noDict_generic(
             hashLong[hl0] = hashSmall[hs0] = curr;   /* update hash tables */
 
             /* check noDict repcode */
-            if ((offset_1 > 0) & (MEM_read32(ip+1-offset_1) == MEM_read32(ip+1))) {
+            if ((offset_1 > 0) & (MEM_read32(ip+1-offset_1) == ((tuned && MEM_64bits()) ? (MEM_isLittleEndian() ? (U32)(currentWord>>8) : (U32)(currentWord>>24)) : MEM_read32(ip+1)))) {
                 mLength = ZSTD_dfastCount(ip+1+4, ip+1+4-offset_1, iend, longMode) + 4;
                 /* A cheap repeat is not necessarily the best match when a
                  * substantially longer regular match starts one byte earlier. */
@@ -291,8 +297,21 @@ size_t ZSTD_compressBlock_doubleFast_noDict_generic(
             /* Same optimization as matchl0 above */
             matchs0_safe = ZSTD_selectAddr(idxs0, prefixLowestIndex, matchs0, &dummy[0]);
 
-            /* check prefix short match */
-            if((!tuned || longMode) ? (MEM_read32(matchs0_safe) == MEM_read32(ip) && matchs0_safe == matchs0) : (idxs0 >= prefixLowestIndex && MEM_read32(matchs0) == MEM_read32(ip))) {
+            /* A valid prefix candidate precedes ip, and ip has eight
+             * readable bytes. Loading its full word is therefore safe.
+             * Still compare all of the initial four bytes: a hash match
+             * alone does not establish that any extra bytes match. */
+            if ((tuned && !swapTables && !longMode) && MEM_64bits()) {
+                if (longMode) {
+                    shortWord = MEM_read64(matchs0_safe);
+                    if ((MEM_isLittleEndian() ? (U32)shortWord : (U32)(shortWord>>32)) == ((tuned && MEM_64bits()) ? (MEM_isLittleEndian() ? (U32)currentWord : (U32)(currentWord>>32)) : MEM_read32(ip)) && matchs0_safe == matchs0)
+                        goto _search_next_long;
+                } else if (idxs0 >= prefixLowestIndex) {
+                    shortWord = MEM_read64(matchs0);
+                    if ((MEM_isLittleEndian() ? (U32)shortWord : (U32)(shortWord>>32)) == ((tuned && MEM_64bits()) ? (MEM_isLittleEndian() ? (U32)currentWord : (U32)(currentWord>>32)) : MEM_read32(ip)))
+                        goto _search_next_long;
+                }
+            } else if((!tuned || longMode) ? (MEM_read32(matchs0_safe) == ((tuned && MEM_64bits()) ? (MEM_isLittleEndian() ? (U32)currentWord : (U32)(currentWord>>32)) : MEM_read32(ip)) && matchs0_safe == matchs0) : (idxs0 >= prefixLowestIndex && MEM_read32(matchs0) == ((tuned && MEM_64bits()) ? (MEM_isLittleEndian() ? (U32)currentWord : (U32)(currentWord>>32)) : MEM_read32(ip)))) {
                   goto _search_next_long;
             }
 
@@ -302,6 +321,7 @@ size_t ZSTD_compressBlock_doubleFast_noDict_generic(
                 step++;
                 nextStep += kStepIncr;
             }
+            if (tuned && MEM_64bits()) currentWord = MEM_read64(ip1);
             ip = ip1;
             ip1 += step;
 
@@ -328,7 +348,13 @@ _cleanup:
 _search_next_long:
 
         /* short match found: let's check for a longer one */
+        if ((tuned && !swapTables && !longMode) && MEM_64bits()) {
+            size_t const diff = (size_t)(shortWord ^ currentWord);
+            mLength = diff ? ZSTD_NbCommonBytes(diff) : 8 + ZSTD_dfastCount(ip+8,matchs0+8,iend,longMode);
+            assert(mLength >= 4);
+        } else {
         mLength = ZSTD_dfastCount(ip+4, matchs0+4, iend, longMode) + 4;
+        }
         offset = (U32)(ip - matchs0);
 
         /* check long match at +1 position */
