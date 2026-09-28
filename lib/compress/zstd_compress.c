@@ -3552,11 +3552,16 @@ size_t ZSTD_generateSequences(ZSTD_CCtx* zc, ZSTD_Sequence* outSeqs,
 
     {
         const size_t ret = ZSTD_compress2(zc, dst, dstCapacity, src, srcSize);
+        size_t const nbSequences = zc->seqCollector.seqIndex;
         ZSTD_customFree(dst, ZSTD_defaultCMem);
+        /* Collection is temporary, and its output buffer belongs to the
+         * caller. Do not retain it across a later compression or retry,
+         * including when sequence generation failed. */
+        ZSTD_memset(&zc->seqCollector, 0, sizeof(zc->seqCollector));
         FORWARD_IF_ERROR(ret, "ZSTD_compress2 failed");
+        assert(nbSequences <= ZSTD_sequenceBound(srcSize));
+        return nbSequences;
     }
-    assert(zc->seqCollector.seqIndex <= ZSTD_sequenceBound(srcSize));
-    return zc->seqCollector.seqIndex;
 }
 
 size_t ZSTD_mergeBlockDelimiters(ZSTD_Sequence* sequences, size_t seqsSize) {
@@ -6611,7 +6616,8 @@ static size_t ZSTD_checkBufferStability(ZSTD_CCtx const* cctx,
  */
 static size_t ZSTD_CCtx_init_compressStream2(ZSTD_CCtx* cctx,
                                              ZSTD_EndDirective endOp,
-                                             size_t inSize)
+                                             size_t inSize,
+                                             const void* sampleSrc, size_t sampleSrcSize)
 {
     ZSTD_CCtx_params params = cctx->requestedParams;
     ZSTD_prefixDict const prefixDict = cctx->prefixDict;
@@ -6641,6 +6647,29 @@ static size_t ZSTD_CCtx_init_compressStream2(ZSTD_CCtx* cctx,
     params.ldmParams.enableLdm = ZSTD_resolveEnableLdm(params.ldmParams.enableLdm, &params.cParams);
     params.useRowMatchFinder = ZSTD_resolveRowMatchFinderMode(params.useRowMatchFinder, &params.cParams);
     params.validateSequences = ZSTD_resolveExternalSequenceValidation(params.validateSequences);
+    /* For complete binary inputs, a smaller block working set reduces
+     * workspace demand without shortening the match window. Sample only
+     * when this call exposes the whole input: deferred stable input and
+     * externally supplied sequences keep their original block policy.
+     * Explicit block limits, dictionaries and LDM are left unchanged. */
+    if (params.maxBlockSize == 0 && params.compressionLevel == 3 && params.nbWorkers == 0 &&
+        params.cParams.strategy == ZSTD_dfast && params.cParams.hashLog == 17 &&
+        params.cParams.chainLog == 16 && params.cParams.minMatch == 5 &&
+        endOp == ZSTD_e_end && sampleSrc != NULL && sampleSrcSize == inSize &&
+        inSize >= (1U << 20) && inSize <= (1U << 30) &&
+        !prefixDict.dict && !cctx->cdict && !ZSTD_hasExtSeqProd(&params) &&
+        params.ldmParams.enableLdm == ZSTD_ps_disable) {
+        const BYTE* const sample = (const BYTE*)sampleSrc;
+        size_t const sampleSize = MIN(sampleSrcSize, 128 KB);
+        size_t const stride = (sampleSize / 2048) | 1;
+        size_t i, count = 0, text = 0;
+        for (i = 0; i < sampleSize; i += stride) {
+            U32 const c = sample[i];
+            text += (c >= 32 && c < 127) || c == 9 || c == 10 || c == 13;
+            ++count;
+        }
+        if (text*4 < count*3) params.maxBlockSize = 96 KB;
+    }
     params.maxBlockSize = ZSTD_resolveMaxBlockSize(params.maxBlockSize);
     params.searchForExternalRepcodes = ZSTD_resolveExternalRepcodeSearch(params.searchForExternalRepcodes, params.compressionLevel);
 
@@ -6740,7 +6769,8 @@ size_t ZSTD_compressStream2( ZSTD_CCtx* cctx,
             /* don't initialize yet, wait for the first block of flush() order, for better parameters adaptation */
             return ZSTD_FRAMEHEADERSIZE_MIN(cctx->requestedParams.format);  /* at least some header to produce */
         }
-        FORWARD_IF_ERROR(ZSTD_CCtx_init_compressStream2(cctx, endOp, totalInputSize), "compressStream2 initialization failed");
+        FORWARD_IF_ERROR(ZSTD_CCtx_init_compressStream2(cctx, endOp, totalInputSize,
+                            input->src ? (const BYTE*)input->src + input->pos : NULL, inputSize), "compressStream2 initialization failed");
         ZSTD_setBufferExpectations(cctx, output, input);   /* Set initial buffer expectations now that we've initialized */
     }
     /* end of transparent initialization stage */
@@ -7334,7 +7364,7 @@ size_t ZSTD_compressSequences(ZSTD_CCtx* cctx,
     /* Transparent initialization stage, same as compressStream2() */
     DEBUGLOG(4, "ZSTD_compressSequences (nbSeqs=%zu,dstCapacity=%zu)", inSeqsSize, dstCapacity);
     assert(cctx != NULL);
-    FORWARD_IF_ERROR(ZSTD_CCtx_init_compressStream2(cctx, ZSTD_e_end, srcSize), "CCtx initialization failed");
+    FORWARD_IF_ERROR(ZSTD_CCtx_init_compressStream2(cctx, ZSTD_e_end, srcSize, NULL, 0), "CCtx initialization failed");
 
     /* Begin writing output, starting with frame header */
     {   size_t const frameHeaderSize = ZSTD_writeFrameHeader(op, dstCapacity,
@@ -7860,7 +7890,7 @@ ZSTD_compressSequencesAndLiterals(ZSTD_CCtx* cctx,
     if (litCapacity < litSize) {
         RETURN_ERROR(workSpace_tooSmall, "literals buffer is not large enough: must be at least 8 bytes larger than litSize (risk of read out-of-bound)");
     }
-    FORWARD_IF_ERROR(ZSTD_CCtx_init_compressStream2(cctx, ZSTD_e_end, decompressedSize), "CCtx initialization failed");
+    FORWARD_IF_ERROR(ZSTD_CCtx_init_compressStream2(cctx, ZSTD_e_end, decompressedSize, NULL, 0), "CCtx initialization failed");
 
     if (cctx->appliedParams.blockDelimiters == ZSTD_sf_noBlockDelimiters) {
         RETURN_ERROR(frameParameter_unsupported, "This mode is only compatible with explicit delimiters");
