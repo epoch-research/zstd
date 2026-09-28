@@ -4334,7 +4334,7 @@ static size_t ZSTD_deriveBlockSplits_hist(ZSTD_CCtx* zc, U32 partitions[], U32 n
         ++back[40+ZSTD_MLcode(b.mlBase)];
     }
     for (i=0; i<96; ++i) diff += front[i]>back[i] ? front[i]-back[i] : back[i]-front[i];
-    if (diff < 192) return 0;
+    if (diff < 160) return 0;
     partitions[0] = nbSeq/2;
     {
         /* Reuse the front histogram for signed log-likelihood ratios.
@@ -6456,7 +6456,7 @@ static size_t ZSTD_compressStream_generic(ZSTD_CStream* zcs,
                 zcs->outBuffFlushedSize = 0;
                 zcs->streamStage = zcss_flush; /* pass-through to flush stage */
             }
-	    ZSTD_FALLTHROUGH;
+            ZSTD_FALLTHROUGH;
         case zcss_flush:
             DEBUGLOG(5, "flush stage");
             assert(zcs->appliedParams.outBufferMode == ZSTD_bm_buffered);
