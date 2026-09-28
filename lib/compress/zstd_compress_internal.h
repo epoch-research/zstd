@@ -270,8 +270,7 @@ typedef struct ZSTD_MatchState_t ZSTD_MatchState_t;
 /* Temporary double-fast flags, confined to a single frame-chunk call. */
 #define ZSTD_DFAST_TAG_PERMITTED 8
 #define ZSTD_DFAST_TAG_ACTIVE 16
-#define ZSTD_DFAST_SHORT_REP 32 /* Independent short primary repeats. */
-#define ZSTD_DFAST_TAG_MASK (ZSTD_DFAST_TAG_PERMITTED | ZSTD_DFAST_TAG_ACTIVE | ZSTD_DFAST_SHORT_REP)
+#define ZSTD_DFAST_TAG_MASK (ZSTD_DFAST_TAG_PERMITTED | ZSTD_DFAST_TAG_ACTIVE)
 
 #define ZSTD_ROW_HASH_CACHE_SIZE 8       /* Size of prefetching hash cache for row-based matchfinder */
 

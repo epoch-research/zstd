@@ -3241,8 +3241,7 @@ static size_t ZSTD_fastSequenceLengthSum(ZSTD_Sequence const* seqBuf, size_t seq
 /**
  * Function to validate sequences produced by a block compressor.
  */
-static void ZSTD_validateSeqStore(const SeqStore_t* seqStore, const ZSTD_compressionParameters* cParams,
-                                  int allow3ByteRepeats)
+static void ZSTD_validateSeqStore(const SeqStore_t* seqStore, const ZSTD_compressionParameters* cParams)
 {
 #if DEBUGLEVEL >= 1
     const SeqDef* seq = seqStore->sequencesStart;
@@ -3250,19 +3249,13 @@ static void ZSTD_validateSeqStore(const SeqStore_t* seqStore, const ZSTD_compres
     size_t const matchLenLowerBound = cParams->minMatch == 3 ? 3 : 4;
     for (; seq < seqEnd; ++seq) {
         const ZSTD_SequenceLength seqLength = ZSTD_getSequenceLength(seqStore, seq);
-        /* Tagged binary primary repeats may have length three, but must
-         * retain a literal and a first-repeat code. They still consume at
-         * least four input bytes per sequence, preserving the allocation bound. */
-        assert(seqLength.matchLength >= matchLenLowerBound ||
-               (allow3ByteRepeats && seqLength.matchLength == 3 &&
-                seqLength.litLength >= 1 && seq->offBase == REPCODE1_TO_OFFBASE));
+        assert(seqLength.matchLength >= matchLenLowerBound);
         (void)seqLength;
         (void)matchLenLowerBound;
     }
 #else
     (void)seqStore;
     (void)cParams;
-    (void)allow3ByteRepeats;
 #endif
 }
 
@@ -3436,8 +3429,7 @@ static size_t ZSTD_buildSeqStore(ZSTD_CCtx* zc, const void* src, size_t srcSize)
         {   const BYTE* const lastLiterals = (const BYTE*)src + srcSize - lastLLSize;
             ZSTD_storeLastLiterals(&zc->seqStore, lastLiterals, lastLLSize);
     }   }
-    ZSTD_validateSeqStore(&zc->seqStore, &zc->appliedParams.cParams,
-                         (ms->dfastMode & (ZSTD_DFAST_TAG_ACTIVE | 3)) == (ZSTD_DFAST_TAG_ACTIVE | 3));
+    ZSTD_validateSeqStore(&zc->seqStore, &zc->appliedParams.cParams);
     return ZSTDbss_compress;
 }
 
@@ -6676,7 +6668,7 @@ static size_t ZSTD_CCtx_init_compressStream2(ZSTD_CCtx* cctx,
             text += (c >= 32 && c < 127) || c == 9 || c == 10 || c == 13;
             ++count;
         }
-        if (text*4 < count*3) params.maxBlockSize = 80 KB;
+        if (text*4 < count*3) params.maxBlockSize = 96 KB;
     }
     params.maxBlockSize = ZSTD_resolveMaxBlockSize(params.maxBlockSize);
     params.searchForExternalRepcodes = ZSTD_resolveExternalRepcodeSearch(params.searchForExternalRepcodes, params.compressionLevel);

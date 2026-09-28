@@ -213,8 +213,7 @@ size_t ZSTD_compressBlock_doubleFast_noDict_generic(
         ZSTD_MatchState_t* ms, SeqStore_t* seqStore, U32 rep[ZSTD_REP_NUM],
         void const* src, size_t srcSize, U32 const mls /* template */,
         U32 const hBitsL, U32 const hBitsS,
-        int const swapTables, int const longMode, int const tuned, int const tagged,
-        int const shortReps)
+        int const swapTables, int const longMode, int const tuned, int const tagged)
 {
     ZSTD_compressionParameters const* cParams = &ms->cParams;
     U32* const hashLong = swapTables ? ms->chainTable : ms->hashTable;
@@ -308,28 +307,15 @@ size_t ZSTD_compressBlock_doubleFast_noDict_generic(
         do {
             const size_t hs0 = ZSTD_hashPtr(ip, hBitsS+(tagged ? ZSTD_DFAST_SHORT_TAG_BITS : 0), mls);
             const U32 idxs0 = ZSTD_dfastLoadShort(hashSmall, hs0, tagged);
-            U64 repDiff;
             curr = (U32)(ip-base);
             currLong = (U32)(ip-longBase);
             matchs0 = longBase + idxs0;
 
             ZSTD_dfastSaveShort(hashSmall, hs0, currLong, tagged); ZSTD_dfastSaveLong(hashLong, hl0, currLong, tagged);   /* update hash tables */
 
-            /* In selected tagged binary blocks, accept a three-byte
-             * repeat at ip+1. It always follows at least one literal, so each
-             * sequence still consumes at least four input bytes: the existing
-             * sequence workspace bound is unchanged. Immediate repeats below
-             * retain their four-byte minimum.
-             *
-             * The cached input word contains seven bytes starting at ip+1.
-             * Compare those in little-endian order, ignoring the eighth byte
-             * of the candidate load. ip+1 <= ip1 <= ilimit bounds that load,
-             * and the validated repeat offset bounds its lower address. */
-            repDiff = (tagged && swapTables && (longMode || shortReps)) ?
-                (MEM_readLE64(ip+1-offset_1) ^ ((MEM_isLittleEndian() ? currentWord : MEM_swap64(currentWord)) >> 8)) & 0x00FFFFFFFFFFFFFFULL :
-                MEM_read32(ip+1-offset_1) ^ ((tuned && MEM_64bits()) ? (MEM_isLittleEndian() ? (U32)(currentWord>>8) : (U32)(currentWord>>24)) : MEM_read32(ip+1));
-            if ((offset_1 > 0) & ((repDiff & ((tagged && swapTables && (longMode || shortReps)) ? 0x00FFFFFFULL : 0xFFFFFFFFULL)) == 0)) {
-                mLength = (tagged && swapTables && (longMode || shortReps)) ? (repDiff ? (ZSTD_countTrailingZeros64(repDiff) >> 3) : ZSTD_dfastCount(ip+8, ip+8-offset_1, iend, longMode) + 7) : ZSTD_dfastCount(ip+5, ip+5-offset_1, iend, longMode) + 4;
+            /* check noDict repcode */
+            if ((offset_1 > 0) & (MEM_read32(ip+1-offset_1) == ((tuned && MEM_64bits()) ? (MEM_isLittleEndian() ? (U32)(currentWord>>8) : (U32)(currentWord>>24)) : MEM_read32(ip+1)))) {
+                mLength = ZSTD_dfastCount(ip+1+4, ip+1+4-offset_1, iend, longMode) + 4;
                 /* A cheap repeat is not necessarily the best match when a
                  * substantially longer regular match starts one byte earlier. */
                 if (tuned && mLength <= 32 && ZSTD_dfastValidLong(idxl0, currLong, longLowestIndex, 1, tagged) && MEM_read64(matchl0) == MEM_read64(ip)) {
@@ -345,7 +331,6 @@ size_t ZSTD_compressBlock_doubleFast_noDict_generic(
                     }
                 }
                 ip++;
-                assert(mLength >= 4 || (tagged && swapTables && (longMode || shortReps) && ip > anchor));
                 ZSTD_storeSeq(seqStore, (size_t)(ip-anchor), anchor, iend, REPCODE1_TO_OFFBASE, mLength);
                 goto _match_stored;
             }
@@ -933,7 +918,7 @@ _match_stored:
     static size_t ZSTD_compressBlock_doubleFast_noDict_##mls( \
         ZSTD_MatchState_t* ms, SeqStore_t* ss, U32 rep[ZSTD_REP_NUM], \
         void const* src, size_t size) { \
-        return ZSTD_compressBlock_doubleFast_noDict_generic(ms,ss,rep,src,size,mls,ms->cParams.hashLog,ms->cParams.chainLog,0,0,0,0,0); \
+        return ZSTD_compressBlock_doubleFast_noDict_generic(ms,ss,rep,src,size,mls,ms->cParams.hashLog,ms->cParams.chainLog,0,0,0,0); \
     }
 ZSTD_GEN_DFAST_NODICT(4)
 ZSTD_GEN_DFAST_NODICT(5)
@@ -952,81 +937,73 @@ ZSTD_GEN_DFAST_FN(dictMatchState, 7)
 FORCE_NOINLINE size_t ZSTD_compressBlock_doubleFast_special(
         ZSTD_MatchState_t* ms, SeqStore_t* ss, U32 rep[ZSTD_REP_NUM],
         void const* src, size_t size) {
-    return ZSTD_compressBlock_doubleFast_noDict_generic(ms,ss,rep,src,size,5,17,16,0,0,1,0,0);
+    return ZSTD_compressBlock_doubleFast_noDict_generic(ms,ss,rep,src,size,5,17,16,0,0,1,0);
 }
 FORCE_NOINLINE size_t ZSTD_compressBlock_doubleFast_specialLong(
         ZSTD_MatchState_t* ms, SeqStore_t* ss, U32 rep[ZSTD_REP_NUM],
         void const* src, size_t size) {
-    return ZSTD_compressBlock_doubleFast_noDict_generic(ms,ss,rep,src,size,5,17,16,0,1,1,0,0);
+    return ZSTD_compressBlock_doubleFast_noDict_generic(ms,ss,rep,src,size,5,17,16,0,1,1,0);
 }
 
 FORCE_NOINLINE size_t ZSTD_compressBlock_doubleFast_text(
         ZSTD_MatchState_t* ms, SeqStore_t* ss, U32 rep[ZSTD_REP_NUM],
         void const* src, size_t size) {
-    return ZSTD_compressBlock_doubleFast_noDict_generic(ms,ss,rep,src,size,6,17,16,0,0,1,0,0);
+    return ZSTD_compressBlock_doubleFast_noDict_generic(ms,ss,rep,src,size,6,17,16,0,0,1,0);
 }
 FORCE_NOINLINE size_t ZSTD_compressBlock_doubleFast_textLong(
         ZSTD_MatchState_t* ms, SeqStore_t* ss, U32 rep[ZSTD_REP_NUM],
         void const* src, size_t size) {
-    return ZSTD_compressBlock_doubleFast_noDict_generic(ms,ss,rep,src,size,6,17,16,0,1,1,0,0);
+    return ZSTD_compressBlock_doubleFast_noDict_generic(ms,ss,rep,src,size,6,17,16,0,1,1,0);
 }
 FORCE_NOINLINE size_t ZSTD_compressBlock_doubleFast_binary(
         ZSTD_MatchState_t* ms, SeqStore_t* ss, U32 rep[ZSTD_REP_NUM],
         void const* src, size_t size) {
-    return ZSTD_compressBlock_doubleFast_noDict_generic(ms,ss,rep,src,size,5,16,17,1,0,1,0,0);
+    return ZSTD_compressBlock_doubleFast_noDict_generic(ms,ss,rep,src,size,5,16,17,1,0,1,0);
 }
 FORCE_NOINLINE size_t ZSTD_compressBlock_doubleFast_binaryLong(
         ZSTD_MatchState_t* ms, SeqStore_t* ss, U32 rep[ZSTD_REP_NUM],
         void const* src, size_t size) {
-    return ZSTD_compressBlock_doubleFast_noDict_generic(ms,ss,rep,src,size,5,16,17,1,1,1,0,0);
+    return ZSTD_compressBlock_doubleFast_noDict_generic(ms,ss,rep,src,size,5,16,17,1,1,1,0);
 }
 
 FORCE_NOINLINE size_t ZSTD_compressBlock_doubleFast_taggedText(
         ZSTD_MatchState_t* ms, SeqStore_t* ss, U32 rep[ZSTD_REP_NUM],
         void const* src, size_t size) {
-    return ZSTD_compressBlock_doubleFast_noDict_generic(ms,ss,rep,src,size,6,17,16,0,0,1,1,0);
+    return ZSTD_compressBlock_doubleFast_noDict_generic(ms,ss,rep,src,size,6,17,16,0,0,1,1);
 }
 FORCE_NOINLINE size_t ZSTD_compressBlock_doubleFast_taggedTextLong(
         ZSTD_MatchState_t* ms, SeqStore_t* ss, U32 rep[ZSTD_REP_NUM],
         void const* src, size_t size) {
-    return ZSTD_compressBlock_doubleFast_noDict_generic(ms,ss,rep,src,size,6,17,16,0,1,1,1,0);
+    return ZSTD_compressBlock_doubleFast_noDict_generic(ms,ss,rep,src,size,6,17,16,0,1,1,1);
 }
 
 FORCE_NOINLINE size_t ZSTD_compressBlock_doubleFast_taggedSpecial(
         ZSTD_MatchState_t* ms, SeqStore_t* ss, U32 rep[ZSTD_REP_NUM],
         void const* src, size_t size) {
-    return ZSTD_compressBlock_doubleFast_noDict_generic(ms,ss,rep,src,size,5,17,16,0,0,1,1,0);
+    return ZSTD_compressBlock_doubleFast_noDict_generic(ms,ss,rep,src,size,5,17,16,0,0,1,1);
 }
 FORCE_NOINLINE size_t ZSTD_compressBlock_doubleFast_taggedSpecialLong(
         ZSTD_MatchState_t* ms, SeqStore_t* ss, U32 rep[ZSTD_REP_NUM],
         void const* src, size_t size) {
-    return ZSTD_compressBlock_doubleFast_noDict_generic(ms,ss,rep,src,size,5,17,16,0,1,1,1,0);
+    return ZSTD_compressBlock_doubleFast_noDict_generic(ms,ss,rep,src,size,5,17,16,0,1,1,1);
 }
 
 FORCE_NOINLINE size_t ZSTD_compressBlock_doubleFast_taggedBinary(
         ZSTD_MatchState_t* ms, SeqStore_t* ss, U32 rep[ZSTD_REP_NUM],
         void const* src, size_t size) {
-    return ZSTD_compressBlock_doubleFast_noDict_generic(ms,ss,rep,src,size,5,16,17,1,0,1,1,0);
+    return ZSTD_compressBlock_doubleFast_noDict_generic(ms,ss,rep,src,size,5,16,17,1,0,1,1);
 }
-/* Moderate match lengths can benefit from short first repeats without
- * enabling wide counting or third-repeat recoding on ordinary matches. */
-FORCE_NOINLINE size_t ZSTD_compressBlock_doubleFast_taggedBinaryShortRep(
-        ZSTD_MatchState_t* ms, SeqStore_t* ss, U32 rep[ZSTD_REP_NUM],
-        void const* src, size_t size) {
-    return ZSTD_compressBlock_doubleFast_noDict_generic(ms,ss,rep,src,size,5,16,17,1,0,1,1,1);
-}
-
 FORCE_NOINLINE size_t ZSTD_compressBlock_doubleFast_taggedBinaryLong(
         ZSTD_MatchState_t* ms, SeqStore_t* ss, U32 rep[ZSTD_REP_NUM],
         void const* src, size_t size) {
-    return ZSTD_compressBlock_doubleFast_noDict_generic(ms,ss,rep,src,size,5,16,17,1,1,1,1,0);
+    return ZSTD_compressBlock_doubleFast_noDict_generic(ms,ss,rep,src,size,5,16,17,1,1,1,1);
 }
 
 #if ZSTD_DFAST_AVX2
 __attribute__((target("avx2"),flatten)) FORCE_NOINLINE size_t ZSTD_compressBlock_doubleFast_taggedSpecialAvx2(
         ZSTD_MatchState_t* ms, SeqStore_t* ss, U32 rep[ZSTD_REP_NUM],
         void const* src, size_t size) {
-    return ZSTD_compressBlock_doubleFast_noDict_generic(ms,ss,rep,src,size,5,17,16,0,2,1,1,0);
+    return ZSTD_compressBlock_doubleFast_noDict_generic(ms,ss,rep,src,size,5,17,16,0,2,1,1);
 }
 #endif
 
@@ -1034,7 +1011,7 @@ __attribute__((target("avx2"),flatten)) FORCE_NOINLINE size_t ZSTD_compressBlock
 __attribute__((target("avx2"),flatten)) FORCE_NOINLINE size_t ZSTD_compressBlock_doubleFast_taggedTextAvx2(
         ZSTD_MatchState_t* ms, SeqStore_t* ss, U32 rep[ZSTD_REP_NUM],
         void const* src, size_t size) {
-    return ZSTD_compressBlock_doubleFast_noDict_generic(ms,ss,rep,src,size,6,17,16,0,2,1,1,0);
+    return ZSTD_compressBlock_doubleFast_noDict_generic(ms,ss,rep,src,size,6,17,16,0,2,1,1);
 }
 #endif
 
@@ -1042,7 +1019,7 @@ __attribute__((target("avx2"),flatten)) FORCE_NOINLINE size_t ZSTD_compressBlock
 __attribute__((target("avx2"),flatten)) FORCE_NOINLINE size_t ZSTD_compressBlock_doubleFast_taggedBinaryAvx2(
         ZSTD_MatchState_t* ms, SeqStore_t* ss, U32 rep[ZSTD_REP_NUM],
         void const* src, size_t size) {
-    return ZSTD_compressBlock_doubleFast_noDict_generic(ms,ss,rep,src,size,5,16,17,1,2,1,1,0);
+    return ZSTD_compressBlock_doubleFast_noDict_generic(ms,ss,rep,src,size,5,16,17,1,2,1,1);
 }
 #endif
 
@@ -1096,8 +1073,6 @@ size_t ZSTD_compressBlock_doubleFast(
                 ZSTD_compressBlock_doubleFast_taggedSpecial(ms,seqStore,rep,src,srcSize);
             else if ((ms->dfastMode & ZSTD_DFAST_TAG_ACTIVE) && mode == 3) result = longMode ?
                 ZSTD_compressBlock_doubleFast_taggedBinaryLong(ms,seqStore,rep,src,srcSize) :
-                (ms->dfastMode & ZSTD_DFAST_SHORT_REP) ?
-                ZSTD_compressBlock_doubleFast_taggedBinaryShortRep(ms,seqStore,rep,src,srcSize) :
                 ZSTD_compressBlock_doubleFast_taggedBinary(ms,seqStore,rep,src,srcSize);
             else if (ms->dfastMode & ZSTD_DFAST_TAG_ACTIVE) result = longMode ?
                 ZSTD_compressBlock_doubleFast_taggedTextLong(ms,seqStore,rep,src,srcSize) :
@@ -1116,14 +1091,8 @@ size_t ZSTD_compressBlock_doubleFast(
                 size_t const matched = srcSize - result - (size_t)(seqStore->lit - litBegin);
                 /* Long-match blocks leave more stale hash entries. Use the
                  * branchless validity checks and wide counter in that case.
-                 * Tagged binary selects this mode at a lower threshold.
-                 * Its separate short-repeat flag enables three-byte primary
-                 * repeats for moderate lengths without the other long-mode
-                 * work. Recompute, rather than preserve, that temporary flag
-                 * each block. The table layout remains stable. */
-                ms->dfastMode = (ms->dfastMode & (ZSTD_DFAST_TAG_MASK & ~ZSTD_DFAST_SHORT_REP)) | mode |
-                    ((n && matched >= n*((mode == 3 && (ms->dfastMode & ZSTD_DFAST_TAG_ACTIVE)) ? 14 : 24)) ? 4 : 0) |
-                    ((mode == 3 && (ms->dfastMode & ZSTD_DFAST_TAG_ACTIVE) && n && matched >= n*10) ? ZSTD_DFAST_SHORT_REP : 0);
+                 * This selection affects speed only, not the parse. */
+                ms->dfastMode = (ms->dfastMode & ZSTD_DFAST_TAG_MASK) | mode | ((n && matched >= n*24) ? 4 : 0);
             }
             return result;
         }
