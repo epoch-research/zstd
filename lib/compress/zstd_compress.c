@@ -4554,7 +4554,21 @@ static size_t ZSTD_optimalBlockSize(ZSTD_CCtx* cctx, const void* src, size_t src
 {
     /* split level based on compression strategy, from `fast` to `btultra2` */
     static const int splitLevels[] = { 0, 0, 1, 2, 2, 3, 3, 4, 4, 4 };
-    /* note: conservatively only split full blocks (128 KB) currently.
+    /* The fast fingerprint also handles partial blocks. Inspect the first
+     * block without the border gate: file headers can conceal a transition
+     * when the two borders happen to have similar byte distributions. */
+    if (splitLevel == 0 && strat == ZSTD_dfast
+        && cctx->appliedParams.cParams.hashLog == 17
+        && cctx->appliedParams.cParams.chainLog == 16
+        && cctx->appliedParams.cParams.minMatch == 5) {
+        size_t const size = MIN(srcSize, blockSizeMax);
+        if (size >= 16 KB && (savings >= 3 || cctx->isFirstBlock))
+            return cctx->isFirstBlock
+                ? ZSTD_splitBlock_fastScan(src, size, cctx->tmpWorkspace, cctx->tmpWkspSize)
+                : ZSTD_splitBlock_fast(src, size, cctx->tmpWorkspace, cctx->tmpWkspSize);
+        return size;
+    }
+    /* Other splitting strategies still require full blocks (128 KB).
      * While it's possible to go lower, let's keep it simple for a first implementation.
      * Besides, benefits of splitting are reduced when blocks are already small.
      */
@@ -4575,13 +4589,6 @@ static size_t ZSTD_optimalBlockSize(ZSTD_CCtx* cctx, const void* src, size_t src
     if (splitLevel == 0) {
         assert(ZSTD_fast <= strat && strat <= ZSTD_btultra2);
         splitLevel = splitLevels[strat];
-        if (strat == ZSTD_dfast
-            && cctx->appliedParams.cParams.hashLog == 17
-            && cctx->appliedParams.cParams.chainLog == 16
-            && cctx->appliedParams.cParams.minMatch == 5) {
-            return ZSTD_splitBlock_fast(src, blockSizeMax,
-                                        cctx->tmpWorkspace, cctx->tmpWkspSize);
-        }
     } else {
         assert(2 <= splitLevel && splitLevel <= 6);
         splitLevel -= 2;

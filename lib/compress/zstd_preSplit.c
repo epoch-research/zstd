@@ -339,7 +339,7 @@ ZSTD_splitBlock_fastChunks(const void* blockStart, size_t blockSize,
     ZSTD_STATIC_ASSERT(HASHLENGTH == 2);
     ZSTD_STATIC_ASSERT(ZSTD_SLIPBLOCK_WORKSPACESIZE >= 6*256*sizeof(U16));
     ZSTD_STATIC_ASSERT(2 * (128 KB / 43 + 128 KB / CHUNKSIZE) < 32768);
-    assert(blockSize == 128 KB);
+    assert(blockSize >= 16 KB && blockSize <= 128 KB);
     assert(wkspSize >= (4+2)*256*sizeof(U16));
     (void)wkspSize;
     ZSTD_memset(ref,0,256*sizeof(U16));
@@ -409,7 +409,7 @@ static int ZSTD_bordersDiffer(const void* blockStart, size_t blockSize,
     const BYTE* const q = p + blockSize - 256;
     U32 distance = 0;
     size_t n, i;
-    assert(blockSize == 128 KB);
+    assert(blockSize >= 16 KB && blockSize <= 128 KB);
     assert(wkspSize >= 2*256*sizeof(U16));
     (void)wkspSize;
     ZSTD_memset(workspace, 0, 2*256*sizeof(U16));
@@ -461,4 +461,12 @@ size_t ZSTD_splitBlock(const void* blockStart, size_t blockSize,
         return ZSTD_splitBlock_fromBorders(blockStart, blockSize, workspace, wkspSize);
     /* level >= 1*/
     return ZSTD_splitBlock_byChunks(blockStart, blockSize, level-1, workspace, wkspSize);
+}
+
+/* The first block may mix a file header with its payload while retaining
+ * similar borders. Use the fine scan directly in that case. */
+size_t ZSTD_splitBlock_fastScan(const void* blockStart, size_t blockSize,
+                                void* workspace, size_t wkspSize)
+{
+    return ZSTD_splitBlock_fastChunks(blockStart, blockSize, workspace, wkspSize);
 }
