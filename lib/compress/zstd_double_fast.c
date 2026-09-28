@@ -544,11 +544,13 @@ _search_next_long:
 
         /* The six-byte prose key has sparser short matches than the
          * five-byte identifier key. If neither earlier lazy probe improved
-         * this short match, try one more long candidate. ip3 is at least
+         * this match, try one more long candidate. Limit this lookahead to
+         * selected matches of at most twelve bytes in short-match mode, or
+         * sixty-four bytes in the existing long-match mode. ip3 is at least
          * three bytes after anchor, and each candidate look-behind byte is
          * independently prefix-bounded. Only credit those three bytes;
          * the usual backward extension still follows a winning candidate. */
-        if (tagged && !swapTables && mls == 6 && mLength <= 16 && step == 1 && ip < ip1 && ip1+2 <= ilimit) {
+        if (tagged && !swapTables && mls == 6 && mLength <= (longMode ? 64 : 12) && step == 1 && ip < ip1 && ip1+2 <= ilimit) {
             const BYTE* const ip3 = ip1+2;
             size_t const h3 = ZSTD_hashPtr(ip3, hBitsL+ZSTD_DFAST_TAG_BITS, 8);
             U32 const idx3 = ZSTD_dfastLoadLong(hashLong, h3, tagged);
