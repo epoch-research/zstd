@@ -278,7 +278,7 @@ typedef struct {
 
 size_t
 ZSTD_buildCTable(void* dst, size_t dstCapacity,
-                FSE_CTable* nextCTable, U32 FSELog, SymbolEncodingType_e type,
+                FSE_CTable* nextCTable, U32 FSELog, unsigned tableLogMinus, SymbolEncodingType_e type,
                 unsigned* count, U32 max,
                 const BYTE* codeTable, size_t nbSeq,
                 const S16* defaultNorm, U32 defaultNormLog, U32 defaultMax,
@@ -304,7 +304,7 @@ ZSTD_buildCTable(void* dst, size_t dstCapacity,
     case set_compressed: {
         ZSTD_BuildCTableWksp* wksp = (ZSTD_BuildCTableWksp*)entropyWorkspace;
         size_t nbSeq_1 = nbSeq;
-        const U32 tableLog = FSE_optimalTableLog(FSELog, nbSeq, max);
+        const U32 tableLog = FSE_optimalTableLog_internal(FSELog, nbSeq, max, tableLogMinus);
         if (count[codeTable[nbSeq-1]] > 1) {
             count[codeTable[nbSeq-1]]--;
             nbSeq_1--;

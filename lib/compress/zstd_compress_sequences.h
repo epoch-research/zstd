@@ -31,7 +31,7 @@ ZSTD_selectEncodingType(
 
 size_t
 ZSTD_buildCTable(void* dst, size_t dstCapacity,
-                FSE_CTable* nextCTable, U32 FSELog, SymbolEncodingType_e type,
+                FSE_CTable* nextCTable, U32 FSELog, unsigned tableLogMinus, SymbolEncodingType_e type,
                 unsigned* count, U32 max,
                 const BYTE* codeTable, size_t nbSeq,
                 const S16* defaultNorm, U32 defaultNormLog, U32 defaultMax,

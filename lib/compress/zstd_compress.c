@@ -2790,6 +2790,9 @@ ZSTD_buildSequencesStatistics(
     stats.longOffsets = ZSTD_seqToCodes(seqStorePtr);
     assert(op <= oend);
     assert(nbSeq != 0); /* ZSTD_selectEncodingType() divides by nbSeq */
+    /* Give dfast's length alphabets one extra bit of precision on small
+     * sequence sets. Offsets and other strategies keep the usual policy;
+     * maximum table logs and workspace sizes remain unchanged. */
     /* build CTable for Literal Lengths */
     {   unsigned max = MaxLL;
         size_t const mostFrequent = HIST_countFast_wksp(countWorkspace, &max, llCodeTable, nbSeq, entropyWorkspace, entropyWkspSize);   /* can't fail */
@@ -2804,7 +2807,7 @@ ZSTD_buildSequencesStatistics(
         assert(!(stats.LLtype < set_compressed && nextEntropy->litlength_repeatMode != FSE_repeat_none)); /* We don't copy tables */
         {   size_t const countSize = ZSTD_buildCTable(
                 op, (size_t)(oend - op),
-                CTable_LitLength, LLFSELog, (SymbolEncodingType_e)stats.LLtype,
+                CTable_LitLength, LLFSELog, strategy == ZSTD_dfast ? 1 : 2, (SymbolEncodingType_e)stats.LLtype,
                 countWorkspace, max, llCodeTable, nbSeq,
                 LL_defaultNorm, LL_defaultNormLog, MaxLL,
                 prevEntropy->litlengthCTable,
@@ -2836,7 +2839,7 @@ ZSTD_buildSequencesStatistics(
         assert(!(stats.Offtype < set_compressed && nextEntropy->offcode_repeatMode != FSE_repeat_none)); /* We don't copy tables */
         {   size_t const countSize = ZSTD_buildCTable(
                 op, (size_t)(oend - op),
-                CTable_OffsetBits, OffFSELog, (SymbolEncodingType_e)stats.Offtype,
+                CTable_OffsetBits, OffFSELog, 2, (SymbolEncodingType_e)stats.Offtype,
                 countWorkspace, max, ofCodeTable, nbSeq,
                 OF_defaultNorm, OF_defaultNormLog, DefaultMaxOff,
                 prevEntropy->offcodeCTable,
@@ -2866,7 +2869,7 @@ ZSTD_buildSequencesStatistics(
         assert(!(stats.MLtype < set_compressed && nextEntropy->matchlength_repeatMode != FSE_repeat_none)); /* We don't copy tables */
         {   size_t const countSize = ZSTD_buildCTable(
                 op, (size_t)(oend - op),
-                CTable_MatchLength, MLFSELog, (SymbolEncodingType_e)stats.MLtype,
+                CTable_MatchLength, MLFSELog, strategy == ZSTD_dfast ? 1 : 2, (SymbolEncodingType_e)stats.MLtype,
                 countWorkspace, max, mlCodeTable, nbSeq,
                 ML_defaultNorm, ML_defaultNormLog, MaxML,
                 prevEntropy->matchlengthCTable,
