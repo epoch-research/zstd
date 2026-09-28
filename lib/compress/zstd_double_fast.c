@@ -359,7 +359,6 @@ _match_stored:
             /* done after iLimit test, as candidates could be > iend-8 */
             {   U32 const indexToInsert = curr+2;
                 hashLong[ZSTD_hashPtr(base+indexToInsert, hBitsL, 8)] = indexToInsert;
-                hashLong[ZSTD_hashPtr(ip-2, hBitsL, 8)] = (U32)(ip-2-base);
                 hashSmall[ZSTD_hashPtr(base+indexToInsert, hBitsS, mls)] = indexToInsert;
                 hashSmall[ZSTD_hashPtr(ip-1, hBitsS, mls)] = (U32)(ip-1-base);
                 /* Fill a few more positions at the beginning of the match.
@@ -386,6 +385,9 @@ _match_stored:
                         hashSmall[hs] = curr+6;
                     }
                 }
+                /* Give the end-of-match candidate priority when a
+                 * complementary insertion maps to the same long-hash bucket. */
+                hashLong[ZSTD_hashPtr(ip-2, hBitsL, 8)] = (U32)(ip-2-base);
             }
 
             /* check immediate repcode */
