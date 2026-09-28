@@ -4361,11 +4361,10 @@ static const U32 ZSTD_splitXlog[257] = {
     524288,
 };
 
-static size_t ZSTD_deriveBlockSplits_hist(ZSTD_CCtx* zc, U32 partitions[], U32 nbSeq)
+FORCE_INLINE_TEMPLATE size_t ZSTD_deriveBlockSplits_hist(ZSTD_CCtx* zc, U32 partitions[], U32 nbSeq, const SeqDef* seq)
 {
     unsigned* const front = (unsigned*)zc->tmpWorkspace;
     unsigned* const back = front + 128;
-    SeqDef const* const seq = zc->seqStore.sequencesStart;
     U32 const quarter = nbSeq/4;
     U32 i, active=0;
     /* Entropy saving in 1/256 bits over the 256 sampled sequences.
@@ -4440,9 +4439,8 @@ static size_t ZSTD_deriveBlockSplits_hist(ZSTD_CCtx* zc, U32 partitions[], U32 n
  * the three repeat codes distinct and groups all explicit offsets together.
  * The histogram test then rejects changes that are
  * too small to justify another entropy header. At most one split is made. */
-static size_t ZSTD_deriveBlockSplits_fast(ZSTD_CCtx* zc, U32 partitions[], U32 nbSeq)
+FORCE_INLINE_TEMPLATE size_t ZSTD_deriveBlockSplits_fast(ZSTD_CCtx* zc, U32 partitions[], U32 nbSeq, const SeqDef* seq)
 {
-    SeqDef const* const seq = zc->seqStore.sequencesStart;
     U32 const quarter = nbSeq/4;
     U32 i;
     int ml=0, ll=0, of=0;
@@ -4460,14 +4458,49 @@ static size_t ZSTD_deriveBlockSplits_fast(ZSTD_CCtx* zc, U32 partitions[], U32 n
     if (ll<0) ll=-ll;
     if (of<0) of=-of;
     if (ml+ll+of < 32) return 0;
-    return ZSTD_deriveBlockSplits_hist(zc,partitions,nbSeq);
+    return ZSTD_deriveBlockSplits_hist(zc,partitions,nbSeq,seq);
+}
+
+/* Keep the uncommon second test out of the ordinary block path while
+ * leaving the first gate and histogram inline. Both invocations reuse the
+ * same scratch space; no parent histogram is needed after its cut is known. */
+FORCE_NOINLINE size_t ZSTD_deriveExtraSplit(ZSTD_CCtx* zc, U32 partitions[], U32 nbSeq, const SeqDef* seq)
+{
+    return ZSTD_deriveBlockSplits_fast(zc, partitions, nbSeq, seq);
 }
 
 static size_t ZSTD_deriveBlockSplits(ZSTD_CCtx* zc, U32 partitions[], U32 nbSeq)
 {
     seqStoreSplits splits;
-    if (zc->appliedParams.cParams.strategy == ZSTD_dfast)
-        return ZSTD_deriveBlockSplits_fast(zc, partitions, nbSeq);
+    if (zc->appliedParams.cParams.strategy == ZSTD_dfast) {
+        SeqDef const* const seq = zc->seqStore.sequencesStart;
+        size_t const result = ZSTD_deriveBlockSplits_fast(zc, partitions, nbSeq, seq);
+        /* Retest only the larger side of a successful first split. This
+         * bounded second test can add one cut, never recurse. The existing
+         * generic partition emitter handles the resulting three pieces. */
+        if (result) {
+            U32 const cut = partitions[0];
+            U32 const start = cut >= nbSeq-cut ? 0 : cut;
+            U32 const length = start == 0 ? cut : nbSeq-cut;
+            U32 child[2];
+            ZSTD_STATIC_ASSERT(ZSTD_MAX_NB_BLOCK_SPLITS >= 3);
+            assert(result == 1 && cut > 0 && cut < nbSeq);
+            if (length >= 4096 &&
+                ZSTD_deriveExtraSplit(zc, child, length, seq+start)) {
+                assert(child[0] > 0 && child[0] < length);
+                if (start == 0) {
+                    partitions[0] = child[0];
+                    partitions[1] = cut;
+                } else {
+                    partitions[1] = cut+child[0];
+                }
+                partitions[2] = nbSeq;
+                assert(partitions[0] < partitions[1] && partitions[1] < nbSeq);
+                return 2;
+            }
+        }
+        return result;
+    }
     splits.splitLocations = partitions;
     splits.idx = 0;
     if (nbSeq <= 4) {
