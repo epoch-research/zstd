@@ -247,6 +247,13 @@ size_t ZSTD_compressBlock_doubleFast_noDict_generic(
                 if ((!tuned || longMode) ? (MEM_read64(matchl0_safe) == MEM_read64(ip) && matchl0_safe == matchl0) : (idxl0 >= prefixLowestIndex && MEM_read64(matchl0) == MEM_read64(ip))) {
                     mLength = ZSTD_dfastCount(ip+8, matchl0+8, iend, longMode) + 8;
                     offset = (U32)(ip-matchl0);
+                    /* Include the current text match's backward extension
+                     * in the lazy comparison. It increases matched length
+                     * and reduces literals, just like the next candidate's
+                     * look-behind credit below. */
+                    if (tuned && !swapTables) {
+                        while (((ip>anchor) & (matchl0>prefixLowest)) && (ip[-1] == matchl0[-1])) { ip--; matchl0--; mLength++; }
+                    }
                     /* One lazy step, charging for the extra literals and for
                      * any increase in the offset's encoding cost. A byte that
                      * can be caught up backwards both extends the match and
@@ -266,10 +273,15 @@ size_t ZSTD_compressBlock_doubleFast_noDict_generic(
                                 mLength = len;
                                 matchl0 = matchl1;
                                 offset = (U32)(ip - matchl0);
+                                if (tuned && !swapTables) {
+                                    while (((ip>anchor) & (matchl0>prefixLowest)) && (ip[-1] == matchl0[-1])) { ip--; matchl0--; mLength++; }
+                                }
                             }
                         }
                     }
-                    while (((ip>anchor) & (matchl0>prefixLowest)) && (ip[-1] == matchl0[-1])) { ip--; matchl0--; mLength++; } /* catch up */
+                    if (!tuned || swapTables) {
+                        while (((ip>anchor) & (matchl0>prefixLowest)) && (ip[-1] == matchl0[-1])) { ip--; matchl0--; mLength++; }
+                    }
                     goto _match_found;
             }   }
 
