@@ -193,6 +193,11 @@ size_t ZSTD_compressBlock_doubleFast_noDict_generic(
     U64 currentWord = 0;
     size_t mLength;
     U32 offset;
+    U32 offBase;
+    /* Track only a third offset established during this invocation. Zero
+     * means unknown; do not rely on rep[2], which double-fast doesn't keep.
+     * Keep this uncommon state on the stack to limit hot-loop registers. */
+    volatile U32 offset_3 = 0;
     U32 curr;
     U32 currLong;
 
@@ -431,9 +436,47 @@ _search_next_long:
         /* fall-through */
 
 _match_found: /* requires ip, offset, mLength */
+        /* Recode an already selected match, without another candidate read.
+         * Second-repeat recoding preserves the first two offsets. For text
+         * and long-match blocks, also use the locally known third offset,
+         * first repeat with literals, and first-repeat-minus-one without
+         * literals. Keep this uncommon path separate from ordinary stores. */
+        if (tagged && UNLIKELY(offset == offset_2 || ((!swapTables || longMode) && (offset == offset_3 ||
+                (ip != anchor ? offset == offset_1 : offset+1 == offset_1))))) {
+            offBase = OFFSET_TO_OFFBASE(offset);
+            if ((tagged && (!swapTables || longMode)) && offset == offset_1 && ip != anchor) {
+                offBase = REPCODE1_TO_OFFBASE;
+            } else {
+                if (tagged && offset == offset_2) {
+                    offBase = (U32)(2-(ip == anchor));
+                } else {
+                    if ((tagged && (!swapTables || longMode)) && offset == offset_3) offBase = (U32)(3-(ip == anchor));
+                    else if ((tagged && (!swapTables || longMode)) && ip == anchor && offset+1 == offset_1) offBase = REPCODE3_TO_OFFBASE;
+                    if (tagged && (!swapTables || longMode)) offset_3 = offset_2;
+                }
+                offset_2 = offset_1;
+                offset_1 = offset;
+            }
+
+            if (step < 4) {
+                /* It is unsafe to write this value back to the hashtable when ip1 is
+                 * greater than or equal to the new ip we will have after we're done
+                 * processing this match. Rather than perform that test directly
+                 * (ip1 >= ip + mLength), which costs speed in practice, we do a simpler
+                 * more predictable test. The minmatch even if we take a short match is
+                 * 4 bytes, so as long as step, the distance between ip and ip1
+                 * (initially) is less than 4, we know ip1 < new ip. */
+                ZSTD_dfastSaveLong(hashLong, hl1, (U32)(ip1-longBase), tagged);
+            }
+
+            assert(offset != 0 && offBase >= 1 && offBase <= ZSTD_REP_NUM);
+            ZSTD_storeSeq(seqStore, (size_t)(ip-anchor), anchor, iend, offBase, mLength);
+
+            goto _match_stored;
+        }
+        if (tagged && (!swapTables || longMode)) offset_3 = offset_2;
         offset_2 = offset_1;
         offset_1 = offset;
-
         if (step < 4) {
             /* It is unsafe to write this value back to the hashtable when ip1 is
              * greater than or equal to the new ip we will have after we're done
