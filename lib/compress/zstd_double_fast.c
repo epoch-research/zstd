@@ -16,11 +16,58 @@
 #if defined(__SSE2__) && !defined(ZSTD_NO_INTRINSICS)
 #include <emmintrin.h>
 #endif
+/* Keep the portable/SSE2 parser on other compilers and architectures.
+ * GCC's runtime feature check includes the OS support required for AVX2.
+ * The wider counter changes only counting speed, never parsing decisions. */
+#if defined(__x86_64__) && defined(__GNUC__) && !defined(__clang__) && __GNUC__ >= 5 && !defined(ZSTD_NO_INTRINSICS)
+#  include <immintrin.h>
+#  define ZSTD_DFAST_AVX2 1
+#else
+#  define ZSTD_DFAST_AVX2 0
+#endif
+
+#if ZSTD_DFAST_AVX2
+/* Do not force inlining into the portable dispatcher. The AVX2 parser
+ * wrappers below flatten calls only within their matching target scope. */
+static __inline __attribute__((unused,target("avx2")))
+size_t ZSTD_dfastCountAvx2(const BYTE* pIn, const BYTE* pMatch, const BYTE* const pInLimit)
+{
+    const BYTE* const pStart = pIn;
+    if ((size_t)(pInLimit-pIn) >= sizeof(size_t)) {
+        size_t const diff = MEM_readST(pMatch) ^ MEM_readST(pIn);
+        if (diff) return ZSTD_NbCommonBytes(diff);
+        pIn+=sizeof(size_t); pMatch+=sizeof(size_t);
+    }
+    while ((size_t)(pInLimit-pIn) >= 64) {
+        __m256i const a0 = _mm256_loadu_si256((const __m256i*)pIn);
+        __m256i const b0 = _mm256_loadu_si256((const __m256i*)pMatch);
+        __m256i const a1 = _mm256_loadu_si256((const __m256i*)(pIn+32));
+        __m256i const b1 = _mm256_loadu_si256((const __m256i*)(pMatch+32));
+        U32 const mask0 = (U32)_mm256_movemask_epi8(_mm256_cmpeq_epi8(a0,b0));
+        U32 const mask1 = (U32)_mm256_movemask_epi8(_mm256_cmpeq_epi8(a1,b1));
+        if (mask0 != 0xffffffffU) return (size_t)(pIn-pStart)+(size_t)ZSTD_countTrailingZeros32(~mask0);
+        if (mask1 != 0xffffffffU) return (size_t)(pIn-pStart)+32+(size_t)ZSTD_countTrailingZeros32(~mask1);
+        pIn+=64; pMatch+=64;
+    }
+    while ((size_t)(pInLimit-pIn) >= 32) {
+        __m256i const a = _mm256_loadu_si256((const __m256i*)pIn);
+        __m256i const b = _mm256_loadu_si256((const __m256i*)pMatch);
+        U32 const mask = (U32)_mm256_movemask_epi8(_mm256_cmpeq_epi8(a,b));
+        if (mask != 0xffffffffU) return (size_t)(pIn-pStart)+(size_t)ZSTD_countTrailingZeros32(~mask);
+        pIn+=32; pMatch+=32;
+    }
+    return (size_t)(pIn-pStart)+ZSTD_count(pIn,pMatch,pInLimit);
+}
+#endif
+
 /* Keep the word-sized fast exit for short matches. For long-match blocks,
  * count sixteen bytes at a time, without reading beyond the input limit. */
 FORCE_INLINE_TEMPLATE size_t ZSTD_dfastCount(const BYTE* pIn, const BYTE* pMatch, const BYTE* const pInLimit, int const useSimd)
 {
     const BYTE* const pStart = pIn;
+#if ZSTD_DFAST_AVX2
+    if (useSimd == 2) return ZSTD_dfastCountAvx2(pIn,pMatch,pInLimit);
+#endif
     if (!useSimd) return ZSTD_count(pIn,pMatch,pInLimit);
     if ((size_t)(pInLimit-pIn) >= sizeof(size_t)) {
         size_t const diff = MEM_readST(pMatch) ^ MEM_readST(pIn);
@@ -431,12 +478,12 @@ _search_next_long:
             }
         }
 
-        /* A short match may hide a better one two bytes later. Only take
-         * this second lazy step when the first step didn't win, and use
-         * the fingerprint to avoid most candidate reads. Keep the search
-         * bounded and leave longer matches alone. No extra table insert
-         * is needed: the usual complementary inserts cover this span. */
-        if (tagged && mLength <= 16 && step == 1 && ip < ip1 && ip1+1 <= ilimit) {
+        /* A short match may hide a better one two bytes later, including
+         * when the first lazy step won. Use the fingerprint to avoid most
+         * candidate reads. Keep the search bounded and leave longer matches
+         * alone. No extra table insert is needed: the usual complementary
+         * inserts cover this span. */
+        if (tagged && mLength <= 16 && step == 1 && ip1+1 <= ilimit) {
             const BYTE* const ip2 = ip1+1;
             size_t const h2 = ZSTD_hashPtr(ip2, hBitsL+ZSTD_DFAST_TAG_BITS, 8);
             U32 const idx2 = ZSTD_dfastLoadLong(hashLong, h2, tagged);
@@ -941,6 +988,30 @@ FORCE_NOINLINE size_t ZSTD_compressBlock_doubleFast_taggedBinaryLong(
     return ZSTD_compressBlock_doubleFast_noDict_generic(ms,ss,rep,src,size,5,16,17,1,1,1,1);
 }
 
+#if ZSTD_DFAST_AVX2
+__attribute__((target("avx2"),flatten)) FORCE_NOINLINE size_t ZSTD_compressBlock_doubleFast_taggedSpecialAvx2(
+        ZSTD_MatchState_t* ms, SeqStore_t* ss, U32 rep[ZSTD_REP_NUM],
+        void const* src, size_t size) {
+    return ZSTD_compressBlock_doubleFast_noDict_generic(ms,ss,rep,src,size,5,17,16,0,2,1,1);
+}
+#endif
+
+#if ZSTD_DFAST_AVX2
+__attribute__((target("avx2"),flatten)) FORCE_NOINLINE size_t ZSTD_compressBlock_doubleFast_taggedTextAvx2(
+        ZSTD_MatchState_t* ms, SeqStore_t* ss, U32 rep[ZSTD_REP_NUM],
+        void const* src, size_t size) {
+    return ZSTD_compressBlock_doubleFast_noDict_generic(ms,ss,rep,src,size,6,17,16,0,2,1,1);
+}
+#endif
+
+#if ZSTD_DFAST_AVX2
+__attribute__((target("avx2"),flatten)) FORCE_NOINLINE size_t ZSTD_compressBlock_doubleFast_taggedBinaryAvx2(
+        ZSTD_MatchState_t* ms, SeqStore_t* ss, U32 rep[ZSTD_REP_NUM],
+        void const* src, size_t size) {
+    return ZSTD_compressBlock_doubleFast_noDict_generic(ms,ss,rep,src,size,5,16,17,1,2,1,1);
+}
+#endif
+
 size_t ZSTD_compressBlock_doubleFast(
         ZSTD_MatchState_t* ms, SeqStore_t* seqStore, U32 rep[ZSTD_REP_NUM],
         void const* src, size_t srcSize)
@@ -979,6 +1050,13 @@ size_t ZSTD_compressBlock_doubleFast(
             SeqDef* const seqBegin = seqStore->sequences;
             BYTE* const litBegin = seqStore->lit;
             size_t result;
+#if ZSTD_DFAST_AVX2
+            if ((ms->dfastMode & ZSTD_DFAST_TAG_ACTIVE) && longMode && __builtin_cpu_supports("avx2")) {
+                if (mode == 1) result = ZSTD_compressBlock_doubleFast_taggedSpecialAvx2(ms,seqStore,rep,src,srcSize);
+                else if (mode == 3) result = ZSTD_compressBlock_doubleFast_taggedBinaryAvx2(ms,seqStore,rep,src,srcSize);
+                else result = ZSTD_compressBlock_doubleFast_taggedTextAvx2(ms,seqStore,rep,src,srcSize);
+            } else
+#endif
             if ((ms->dfastMode & ZSTD_DFAST_TAG_ACTIVE) && mode == 1) result = longMode ?
                 ZSTD_compressBlock_doubleFast_taggedSpecialLong(ms,seqStore,rep,src,srcSize) :
                 ZSTD_compressBlock_doubleFast_taggedSpecial(ms,seqStore,rep,src,srcSize);
