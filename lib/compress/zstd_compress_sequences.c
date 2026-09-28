@@ -153,6 +153,39 @@ size_t ZSTD_crossEntropyCost(short const* norm, unsigned accuracyLog,
     return cost >> 8;
 }
 
+/* Estimate whether retaining the previous table saves its description cost.
+ * The fresh-table estimate uses the same piecewise-linear bit cost as FSE,
+ * without normalizing counts or constructing a second table. One reciprocal
+ * serves all symbols. Keep eight fractional bits throughout the comparison.
+ * A repeat is considered only if every active symbol has a valid old code. */
+static int ZSTD_shouldRepeatFSE(const FSE_CTable* table, const unsigned* count,
+                               unsigned max, size_t total)
+{
+    FSE_CState_t state;
+    U32 cost = 0, fresh = 0, active = 0;
+    U32 const inv = (1U << 24) / (U32)total;
+    unsigned s;
+    assert(total > 0 && total <= ZSTD_BLOCKSIZE_MAX);
+    if (ZSTD_getFSEMaxSymbolValue(table) < max) return 0;
+    FSE_initCState(&state, table);
+    for (s = 0; s <= max; ++s) {
+        U32 const c = count[s];
+        if (c) {
+            U32 const oldBits = FSE_bitCost(state.symbolTT, state.stateLog, s, 8);
+            U32 bits = ZSTD_highbit32((U32)total) - ZSTD_highbit32(c);
+            U32 newBits;
+            if (oldBits >= (state.stateLog+1)*256) return 0;
+            bits += (c << bits) < total;
+            newBits = bits*256 + 256 - (U32)(((U64)(c << bits)*inv) >> 16);
+            cost += c*oldBits;
+            fresh += c*newBits;
+            ++active;
+        }
+    }
+    /* Allow one byte of table description per represented symbol. */
+    return cost <= fresh + active*8*256;
+}
+
 SymbolEncodingType_e
 ZSTD_selectEncodingType(
         FSE_repeat* repeatMode, unsigned const* count, unsigned const max,
@@ -175,6 +208,10 @@ ZSTD_selectEncodingType(
         }
         DEBUGLOG(5, "Selected set_rle");
         return set_rle;
+    }
+    if (strategy == ZSTD_dfast && *repeatMode != FSE_repeat_none
+        && ZSTD_shouldRepeatFSE(prevCTable, count, max, nbSeq)) {
+        return set_repeat;
     }
     if (strategy < ZSTD_lazy) {
         if (isDefaultAllowed) {

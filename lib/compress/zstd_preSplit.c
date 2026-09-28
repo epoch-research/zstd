@@ -320,14 +320,14 @@ static int ZSTD_bordersDiffer(const void* blockStart, size_t blockSize,
     U16* const a = (U16*)workspace;
     U16* const b = a + 256;
     const BYTE* const p = (const BYTE*)blockStart;
-    const BYTE* const q = p + blockSize - 512;
+    const BYTE* const q = p + blockSize - 256;
     U32 distance = 0;
     size_t n, i;
     assert(blockSize == 128 KB);
     assert(wkspSize >= 2*256*sizeof(U16));
     (void)wkspSize;
     ZSTD_memset(workspace, 0, 2*256*sizeof(U16));
-    for (n = 0; n < 512; ++n) {
+    for (n = 0; n < 256; ++n) {
         a[p[n]]++;
         b[q[n]]++;
     }
@@ -341,7 +341,7 @@ static int ZSTD_bordersDiffer(const void* blockStart, size_t blockSize,
             __m128i const sign = _mm_srai_epi16(diff, 15);
             acc = _mm_add_epi16(acc, _mm_sub_epi16(_mm_xor_si128(diff, sign), sign));
         }
-        /* The total distance is at most 1024, so signed 16-bit sums suffice. */
+        /* The total distance is at most 512, so signed 16-bit sums suffice. */
         sum = _mm_madd_epi16(acc, _mm_set1_epi16(1));
         sum = _mm_add_epi32(sum, _mm_srli_si128(sum, 8));
         sum = _mm_add_epi32(sum, _mm_srli_si128(sum, 4));
@@ -353,7 +353,7 @@ static int ZSTD_bordersDiffer(const void* blockStart, size_t blockSize,
         distance += (U32)(d < 0 ? -d : d);
     }
 #endif
-    return distance >= 512*12/16;
+    return distance >= 256*12/16;
 }
 
 /* Refine the cheap estimate only when the borders indicate a change. */
