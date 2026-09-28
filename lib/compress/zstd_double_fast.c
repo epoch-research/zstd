@@ -403,49 +403,55 @@ _match_stored:
                 hashLong[ZSTD_hashPtr(base+indexToInsert, hBitsL, 8)] = indexToInsert;
                 hashSmall[ZSTD_hashPtr(base+indexToInsert, hBitsS, mls)] = indexToInsert;
                 hashSmall[ZSTD_hashPtr(ip-1, hBitsS, mls)] = (U32)(ip-1-base);
-                /* Fill a few more positions within the match.
-                 * Text benefits from denser insertion. For binary inputs,
-                 * reserve the extra positions for matches longer than eight
-                 * bytes; short matches already have enough hash coverage.
-                 * Never insert at or beyond the next search position.
-                 * The enclosing ilimit check makes these hash reads safe. */
+                /* Spread the extra insertions across longer text matches.
+                 * Shorter text matches retain denser front coverage. Binary
+                 * matches use the additional positions only beyond eight
+                 * bytes. All inserted positions precede the next search,
+                 * and the enclosing ilimit check makes the hash reads safe. */
                 if (tuned) {
-                    hashLong[ZSTD_hashPtr(base+curr+3, hBitsL, 8)] = curr+3;
-                    if (base+curr+4 < ip) {
-                        size_t const hl = ZSTD_hashPtr(base+curr+4, hBitsL, 8);
-                        size_t const hs = ZSTD_hashPtr(base+curr+4, hBitsS, mls);
-                        hashLong[hl] = curr+4;
-                        hashSmall[hs] = curr+4;
-                    }
                     if (!swapTables && (size_t)(ip-(base+curr)) >= 16) {
-                        /* Spread the text layout's extra entries across
-                         * longer matches instead of clustering all of them
-                         * at the beginning. The span is measured from the
-                         * original search position, before back extension. */
-                        size_t const hl5 = ZSTD_hashPtr(ip-5, hBitsL, 8);
-                        size_t const hl4 = ZSTD_hashPtr(ip-4, hBitsL, 8);
-                        size_t const hs4 = ZSTD_hashPtr(ip-4, hBitsS, mls);
-                        U32 const matchEndIndex = (U32)(ip-base);
-                        hashLong[hl5] = matchEndIndex-5;
-                        hashLong[hl4] = matchEndIndex-4;
-                        hashSmall[hs4] = matchEndIndex-4;
-                    } else if (!swapTables && base+curr+6 < ip) {
-                        /* One bound covers both extra positions. */
                         hashLong[ZSTD_hashPtr(base+curr+5, hBitsL, 8)] = curr+5;
-                        {   size_t const hl = ZSTD_hashPtr(base+curr+6, hBitsL, 8);
-                            size_t const hs = ZSTD_hashPtr(base+curr+6, hBitsS, mls);
-                            hashLong[hl] = curr+6;
-                            hashSmall[hs] = curr+6;
+                        {   size_t const hl = ZSTD_hashPtr(base+curr+8, hBitsL, 8);
+                            size_t const hs = ZSTD_hashPtr(base+curr+8, hBitsS, mls);
+                            hashLong[hl] = curr+8;
+                            hashSmall[hs] = curr+8;
+                        }
+                        /* Measure the span from the original search position,
+                         * before backward extension of the selected match. */
+                        {   size_t const hl7 = ZSTD_hashPtr(ip-7, hBitsL, 8);
+                            size_t const hl4 = ZSTD_hashPtr(ip-4, hBitsL, 8);
+                            size_t const hs4 = ZSTD_hashPtr(ip-4, hBitsS, mls);
+                            U32 const matchEndIndex = (U32)(ip-base);
+                            hashLong[hl7] = matchEndIndex-7;
+                            hashLong[hl4] = matchEndIndex-4;
+                            hashSmall[hs4] = matchEndIndex-4;
                         }
                     } else {
-                        if ((!swapTables || (size_t)(ip-(base+curr))>8) && base+curr+5 < ip) {
-                            hashLong[ZSTD_hashPtr(base+curr+5, hBitsL, 8)] = curr+5;
+                        hashLong[ZSTD_hashPtr(base+curr+3, hBitsL, 8)] = curr+3;
+                        if (base+curr+4 < ip) {
+                            size_t const hl = ZSTD_hashPtr(base+curr+4, hBitsL, 8);
+                            size_t const hs = ZSTD_hashPtr(base+curr+4, hBitsS, mls);
+                            hashLong[hl] = curr+4;
+                            hashSmall[hs] = curr+4;
                         }
-                        if ((!swapTables || (size_t)(ip-(base+curr))>8) && base+curr+6 < ip) {
-                            size_t const hl = ZSTD_hashPtr(base+curr+6, hBitsL, 8);
-                            size_t const hs = ZSTD_hashPtr(base+curr+6, hBitsS, mls);
-                            hashLong[hl] = curr+6;
-                            hashSmall[hs] = curr+6;
+                        if (!swapTables && base+curr+6 < ip) {
+                            /* One bound covers both extra positions. */
+                            hashLong[ZSTD_hashPtr(base+curr+5, hBitsL, 8)] = curr+5;
+                            {   size_t const hl = ZSTD_hashPtr(base+curr+6, hBitsL, 8);
+                                size_t const hs = ZSTD_hashPtr(base+curr+6, hBitsS, mls);
+                                hashLong[hl] = curr+6;
+                                hashSmall[hs] = curr+6;
+                            }
+                        } else {
+                            if ((!swapTables || (size_t)(ip-(base+curr))>8) && base+curr+5 < ip) {
+                                hashLong[ZSTD_hashPtr(base+curr+5, hBitsL, 8)] = curr+5;
+                            }
+                            if ((!swapTables || (size_t)(ip-(base+curr))>8) && base+curr+6 < ip) {
+                                size_t const hl = ZSTD_hashPtr(base+curr+6, hBitsL, 8);
+                                size_t const hs = ZSTD_hashPtr(base+curr+6, hBitsS, mls);
+                                hashLong[hl] = curr+6;
+                                hashSmall[hs] = curr+6;
+                            }
                         }
                     }
                 }
