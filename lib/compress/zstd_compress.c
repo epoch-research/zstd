@@ -2008,6 +2008,7 @@ ZSTD_reset_matchState(ZSTD_MatchState_t* ms,
 
     ms->hashLog3 = hashLog3;
     ms->lazySkipping = 0;
+    ms->dfastMode = 0;
 
     ZSTD_invalidateMatchState(ms);
 
@@ -4552,7 +4553,7 @@ static void ZSTD_overflowCorrectIfNeeded(ZSTD_MatchState_t* ms,
 static size_t ZSTD_optimalBlockSize(ZSTD_CCtx* cctx, const void* src, size_t srcSize, size_t blockSizeMax, int splitLevel, ZSTD_strategy strat, S64 savings)
 {
     /* split level based on compression strategy, from `fast` to `btultra2` */
-    static const int splitLevels[] = { 0, 0, 1, 2, 2, 3, 3, 4, 4, 4 };
+    static const int splitLevels[] = { 0, 0, 0, 2, 2, 3, 3, 4, 4, 4 };
     /* note: conservatively only split full blocks (128 KB) currently.
      * While it's possible to go lower, let's keep it simple for a first implementation.
      * Besides, benefits of splitting are reduced when blocks are already small.
