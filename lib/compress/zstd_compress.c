@@ -5004,6 +5004,26 @@ static size_t ZSTD_compress_frameChunk(ZSTD_CCtx* cctx,
         assert(ms->window.dictLimit >= ZSTD_WINDOW_START_INDEX);
         ms->dfastTagOrigin = ms->window.dictLimit - ZSTD_WINDOW_START_INDEX;
         ms->dfastMode = ZSTD_DFAST_TAG_PERMITTED;
+        /* A text preface need not contain the identifiers found later in
+         * a source archive. Promote source-like whole chunks to the existing
+         * five-byte text layout; otherwise keep the first-block classifier.
+         * Require stronger whole-chunk text evidence, but allow identifiers
+         * to be diluted by prose sections. This does not override positive
+         * first-block evidence. Only this history-free final-chunk scope
+         * guarantees that the entire sampled input is available here. */
+        {
+            const BYTE* const p = (const BYTE*)src;
+            size_t const stride = (srcSize / 1024) | 1;
+            size_t i, text=0, syntax=0, samples=0;
+            for (i=0; i<srcSize; i+=stride) {
+                U32 const c = p[i];
+                text += (c>=32 && c<127) || c==9 || c==10 || c==13;
+                syntax += c=='_';
+                ++samples;
+            }
+            if (text*8 >= samples*7 && syntax*128 >= samples)
+                ms->dfastMode |= 1;
+        }
     }
     result = ZSTD_compress_frameChunk_body(cctx, dst, dstCapacity, src, srcSize, lastFrameChunk);
     if (ms->dfastMode & ZSTD_DFAST_TAG_ACTIVE) {
