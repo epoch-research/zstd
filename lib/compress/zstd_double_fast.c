@@ -431,6 +431,20 @@ _search_next_long:
             }
         }
 
+        /* For short binary candidates, compare the second repeat before
+         * backward extension. Charge a normal offset's bits against the
+         * repeat's length advantage. A winning repeat reaches the existing
+         * recoding path, without carrying a separate flag in the hot loop. */
+        if (tagged && swapTables && mLength <= 16 && offset_2 > 0 &&
+            MEM_read32(ip-offset_2) == MEM_read32(ip)) {
+            size_t const rlen = ZSTD_dfastCount(ip+4, ip+4-offset_2, iend, longMode) + 4;
+            if (((int)rlen-(int)mLength)*(swapTables ? 4 : 3) + (int)ZSTD_highbit32(offset+3) > 0) {
+                mLength = rlen;
+                offset = offset_2;
+                matchs0 = ip-offset;
+            }
+        }
+
         while (((ip>anchor) & (matchs0>prefixLowest)) && (ip[-1] == matchs0[-1])) { ip--; matchs0--; mLength++; } /* complete backward */
 
         /* fall-through */
