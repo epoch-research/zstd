@@ -248,6 +248,11 @@ static ZSTD_ParamSwitch_e ZSTD_resolveRowMatchFinderMode(ZSTD_ParamSwitch_e mode
 static ZSTD_ParamSwitch_e ZSTD_resolveBlockSplitterMode(ZSTD_ParamSwitch_e mode,
                                                         const ZSTD_compressionParameters* const cParams) {
     if (mode != ZSTD_ps_auto) return mode;
+    /* The common double-fast configuration uses a sampled, single-split
+     * test instead of the recursive entropy estimator. */
+    if (cParams->strategy == ZSTD_dfast && cParams->hashLog == 17
+        && cParams->chainLog == 16 && cParams->minMatch == 5)
+        return ZSTD_ps_enable;
     return (cParams->strategy >= ZSTD_btopt && cParams->windowLog >= 17) ? ZSTD_ps_enable : ZSTD_ps_disable;
 }
 
@@ -4067,12 +4072,66 @@ ZSTD_resolveRepcodeToRawOffset(const U32 rep[ZSTD_REP_NUM], const U32 offBase, c
  *        1-3 : repcode 1-3
  *        4+ : real_offset+3
  */
+/* Resolve final repeat offsets backwards. Each pending result is an index
+ * into the preceding repeat history plus an unsigned bias (for rep0-1).
+ * Ordinary offsets terminate these dependencies, usually within a few
+ * sequences. A bounded search avoids scanning long runs of repeats; in
+ * that case the caller uses its original forward simulation instead. */
+static int ZSTD_seqStore_finalReps(Repcodes_t* result, const Repcodes_t* initial,
+                                 const SeqStore_t* seqStore, U32 nbSeq)
+{
+    U32 index[3] = {0,1,2};
+    U32 bias[3] = {0,0,0};
+    U32 pending = 7;
+    U32 i = nbSeq, j;
+    U32 const stop = nbSeq > 64 ? nbSeq-64 : 0;
+    U32 const longLitIdx = seqStore->longLengthType == ZSTD_llt_literalLength ? seqStore->longLengthPos : nbSeq;
+    while (i>stop && pending) {
+        const SeqDef* const seq = seqStore->sequencesStart + --i;
+        U32 const offBase = seq->offBase;
+        assert(offBase > 0);
+        if (OFFBASE_IS_OFFSET(offBase)) {
+            for (j=0; j<3; ++j) if (pending & (1U<<j)) {
+                if (index[j] == 0) {
+                    result->rep[j] = OFFBASE_TO_OFFSET(offBase) + bias[j];
+                    pending &= ~(1U<<j);
+                } else --index[j];
+            }
+        } else {
+            U32 const code = offBase-1 + ((seq->litLength == 0) && (i != longLitIdx));
+            for (j=0; j<3; ++j) if (pending & (1U<<j)) {
+                if (code == 1) {
+                    if (index[j] < 2) index[j] ^= 1;
+                } else if (code == 2) {
+                    index[j] = index[j] == 0 ? 2 : index[j]-1;
+                } else if (code == 3) {
+                    if (index[j] == 0) --bias[j];
+                    else --index[j];
+                }
+            }
+        }
+    }
+    if (pending && i != 0) return 0;
+    for (j=0; j<3; ++j) if (pending & (1U<<j)) result->rep[j] = initial->rep[index[j]] + bias[j];
+    return 1;
+}
+
 static void
 ZSTD_seqStore_resolveOffCodes(Repcodes_t* const dRepcodes, Repcodes_t* const cRepcodes,
                         const SeqStore_t* const seqStore, U32 const nbSeq)
 {
     U32 idx = 0;
     U32 const longLitLenIdx = seqStore->longLengthType == ZSTD_llt_literalLength ? seqStore->longLengthPos : nbSeq;
+    /* Equal histories need no offset rewriting. Only their final values
+     * are required, so try the bounded reverse walk first. */
+    if (dRepcodes->rep[0] == cRepcodes->rep[0] && dRepcodes->rep[1] == cRepcodes->rep[1]
+        && dRepcodes->rep[2] == cRepcodes->rep[2]) {
+        Repcodes_t final;
+        if (ZSTD_seqStore_finalReps(&final, cRepcodes, seqStore, nbSeq)) {
+            *dRepcodes = *cRepcodes = final;
+            return;
+        }
+    }
     for (; idx < nbSeq; ++idx) {
         SeqDef* const seq = seqStore->sequencesStart + idx;
         U32 const ll0 = (seq->litLength == 0) && (idx != longLitLenIdx);
@@ -4237,9 +4296,65 @@ ZSTD_deriveBlockSplitsHelper(seqStoreSplits* splits, size_t startIdx, size_t end
  *
  * @return: number of splits made (which equals the size of the partition table - 1).
  */
+/* Compare length-code distributions in the first and last quarters.
+ * 40 literal-length bins and 56 match-length bins include the complete
+ * alphabets, rounded for simple vectorization. No extra allocation is
+ * needed: the histograms occupy the existing entropy scratch space. */
+static size_t ZSTD_deriveBlockSplits_hist(ZSTD_CCtx* zc, U32 partitions[], U32 nbSeq)
+{
+    unsigned* const front = (unsigned*)zc->tmpWorkspace;
+    unsigned* const back = front + 96;
+    SeqDef const* const seq = zc->seqStore.sequencesStart;
+    U32 const quarter = nbSeq/4;
+    U32 i, diff=0;
+    partitions[0] = nbSeq;
+    if (nbSeq < 1024) return 0;
+    ZSTD_memset(front, 0, 192*sizeof(unsigned));
+    for (i=0; i<128; ++i) {
+        U32 const pos = (i*quarter)>>7;
+        SeqDef const a = seq[pos];
+        SeqDef const b = seq[nbSeq-quarter+pos];
+        ++front[ZSTD_LLcode(a.litLength)];
+        ++front[40+ZSTD_MLcode(a.mlBase)];
+        ++back[ZSTD_LLcode(b.litLength)];
+        ++back[40+ZSTD_MLcode(b.mlBase)];
+    }
+    for (i=0; i<96; ++i) diff += front[i]>back[i] ? front[i]-back[i] : back[i]-front[i];
+    if (diff < 192) return 0;
+    partitions[0] = nbSeq/2;
+    partitions[1] = nbSeq;
+    return 1;
+}
+
+/* Reject stationary blocks with a small sample of clipped lengths before
+ * building histograms. The histogram test then rejects changes that are
+ * too small to justify another entropy header. At most one split is made. */
+static size_t ZSTD_deriveBlockSplits_fast(ZSTD_CCtx* zc, U32 partitions[], U32 nbSeq)
+{
+    SeqDef const* const seq = zc->seqStore.sequencesStart;
+    U32 const quarter = nbSeq/4;
+    U32 i;
+    int ml=0, ll=0;
+    partitions[0] = nbSeq;
+    if (nbSeq < 1024) return 0;
+    for (i=0; i<32; ++i) {
+        U32 const pos = (i*quarter)/32;
+        SeqDef const a = seq[pos];
+        SeqDef const b = seq[nbSeq-quarter+pos];
+        ml += (int)MIN(a.mlBase,32) - (int)MIN(b.mlBase,32);
+        ll += (int)MIN(a.litLength,16) - (int)MIN(b.litLength,16);
+    }
+    if (ml<0) ml=-ml;
+    if (ll<0) ll=-ll;
+    if (ml+ll < 32) return 0;
+    return ZSTD_deriveBlockSplits_hist(zc,partitions,nbSeq);
+}
+
 static size_t ZSTD_deriveBlockSplits(ZSTD_CCtx* zc, U32 partitions[], U32 nbSeq)
 {
     seqStoreSplits splits;
+    if (zc->appliedParams.cParams.strategy == ZSTD_dfast)
+        return ZSTD_deriveBlockSplits_fast(zc, partitions, nbSeq);
     splits.splitLocations = partitions;
     splits.idx = 0;
     if (nbSeq <= 4) {
@@ -4310,6 +4425,49 @@ ZSTD_compressBlock_splitBlock_internal(ZSTD_CCtx* zc,
         assert(zc->blockSizeMax <= ZSTD_BLOCKSIZE_MAX);
         assert(cSizeSingleBlock <= zc->blockSizeMax + ZSTD_blockHeaderSize);
         return cSizeSingleBlock;
+    }
+
+    /* A single split needs only one prefix scan. Compute both its literal
+     * span and source length together, then derive the suffix directly.
+     * Keep the general partition loop for the recursive splitter. */
+    if (numSplits == 1 && zc->appliedParams.cParams.strategy == ZSTD_dfast) {
+        U32 const mid = partitions[0];
+        const SeqStore_t* const whole = &zc->seqStore;
+        U32 j;
+        size_t literals=0, matches=0, firstBytes, firstSize, secondSize;
+        for (j=0; j<mid; ++j) {
+            literals += whole->sequencesStart[j].litLength;
+            matches += whole->sequencesStart[j].mlBase;
+        }
+        matches += mid*MINMATCH;
+        if (whole->longLengthPos < mid) {
+            if (whole->longLengthType == ZSTD_llt_literalLength) literals += 0x10000;
+            if (whole->longLengthType == ZSTD_llt_matchLength) matches += 0x10000;
+        }
+        firstBytes = literals+matches;
+        assert(firstBytes <= blockSize);
+        *currSeqStore = *nextSeqStore = *whole;
+        currSeqStore->sequences = whole->sequencesStart+mid;
+        currSeqStore->lit = whole->litStart+literals;
+        nextSeqStore->sequencesStart = whole->sequencesStart+mid;
+        nextSeqStore->litStart = whole->litStart+literals;
+        nextSeqStore->llCode += mid;
+        nextSeqStore->mlCode += mid;
+        nextSeqStore->ofCode += mid;
+        if (whole->longLengthPos < mid) {
+            nextSeqStore->longLengthType = ZSTD_llt_none;
+        } else {
+            currSeqStore->longLengthType = ZSTD_llt_none;
+            nextSeqStore->longLengthPos -= mid;
+        }
+        firstSize = ZSTD_compressSeqStore_singleBlock(zc,currSeqStore,&dRep,&cRep,
+                op,dstCapacity,ip,firstBytes,0,1);
+        FORWARD_IF_ERROR(firstSize, "first split partition");
+        secondSize = ZSTD_compressSeqStore_singleBlock(zc,nextSeqStore,&dRep,&cRep,
+                op+firstSize,dstCapacity-firstSize,ip+firstBytes,blockSize-firstBytes,lastBlock,1);
+        FORWARD_IF_ERROR(secondSize, "second split partition");
+        ZSTD_memcpy(zc->blockState.prevCBlock->rep,dRep.rep,sizeof(Repcodes_t));
+        return firstSize+secondSize;
     }
 
     ZSTD_deriveSeqStoreChunk(currSeqStore, &zc->seqStore, 0, partitions[0]);
