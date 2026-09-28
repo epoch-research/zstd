@@ -663,6 +663,17 @@ _match_stored:
                 ZSTD_dfastSaveShort(hashSmall, ZSTD_hashPtr(ip, hBitsS+(tagged ? ZSTD_DFAST_SHORT_TAG_BITS : 0), mls), (U32)(ip-longBase), tagged);
                 ZSTD_dfastSaveLong(hashLong, ZSTD_hashPtr(ip, hBitsL+(tagged ? ZSTD_DFAST_TAG_BITS : 0), 8), (U32)(ip-longBase), tagged);
                 ZSTD_storeSeqOnly(seqStore, 0, REPCODE1_TO_OFFBASE, rLength);
+                /* Consecutive repeat matches otherwise insert only their
+                 * starting position. For longer repeats, cover the front and
+                 * tail too, keeping the end entries newest in their buckets.
+                 * All inserts precede the next search. Requiring the match end
+                 * at or before ilimit bounds every full-width hash read. */
+                if (tagged && rLength >= 32 && ip+rLength <= ilimit) {
+                    ZSTD_dfastSaveLong(hashLong, ZSTD_hashPtr(ip+2, hBitsL+ZSTD_DFAST_TAG_BITS, 8), (U32)(ip+2-longBase), tagged);
+                    ZSTD_dfastSaveShort(hashSmall, ZSTD_hashPtr(ip+2, hBitsS+ZSTD_DFAST_SHORT_TAG_BITS, mls), (U32)(ip+2-longBase), tagged);
+                    ZSTD_dfastSaveLong(hashLong, ZSTD_hashPtr(ip+rLength-2, hBitsL+ZSTD_DFAST_TAG_BITS, 8), (U32)(ip+rLength-2-longBase), tagged);
+                    ZSTD_dfastSaveShort(hashSmall, ZSTD_hashPtr(ip+rLength-1, hBitsS+ZSTD_DFAST_SHORT_TAG_BITS, mls), (U32)(ip+rLength-1-longBase), tagged);
+                }
                 ip += rLength;
                 anchor = ip;
                 continue;   /* faster when present ... (?) */
