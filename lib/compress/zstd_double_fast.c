@@ -431,6 +431,37 @@ _search_next_long:
             }
         }
 
+        /* A short match may hide a better one two bytes later. Only take
+         * this second lazy step when the first step didn't win, and use
+         * the fingerprint to avoid most candidate reads. Keep the search
+         * bounded and leave longer matches alone. No extra table insert
+         * is needed: the usual complementary inserts cover this span. */
+        if (tagged && mLength <= 16 && step == 1 && ip < ip1 && ip1+1 <= ilimit) {
+            const BYTE* const ip2 = ip1+1;
+            size_t const h2 = ZSTD_hashPtr(ip2, hBitsL+ZSTD_DFAST_TAG_BITS, 8);
+            U32 const idx2 = ZSTD_dfastLoadLong(hashLong, h2, tagged);
+            if (ZSTD_dfastValidLong(idx2, (U32)(ip2-longBase), longLowestIndex, 1, tagged)) {
+                const BYTE* const match2 = longBase+idx2;
+                if (MEM_read64(ip2) == MEM_read64(match2)) {
+                    size_t const len2 = ZSTD_dfastCount(ip2+8, match2+8, iend, longMode)+8;
+                    U32 const off2 = (U32)(ip2-match2);
+                    /* ip2 is two bytes past the original search position,
+                     * hence neither input look-behind byte precedes the anchor.
+                     * Check the candidate's prefix bound independently. */
+                    int const back = ip2[-1] == match2[-1] ?
+                        (idx2 > longLowestIndex+1 && ip2[-2] == match2[-2] ? 2 : 1) : 0;
+                    if (((int)len2-(int)mLength)*(swapTables ? 4 : 3) >
+                        (int)ZSTD_highbit32(off2+3)-(int)ZSTD_highbit32(offset+3) +
+                        ((int)(ip2-ip)-2*back)*(swapTables ? 4 : 3)) {
+                        ip = ip2;
+                        mLength = len2;
+                        offset = off2;
+                        matchs0 = match2;
+                    }
+                }
+            }
+        }
+
         /* For short binary candidates, compare the second repeat before
          * backward extension. Charge a normal offset's bits against the
          * repeat's length advantage. A winning repeat reaches the existing
