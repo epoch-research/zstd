@@ -127,23 +127,45 @@ void ZSTD_fillDoubleHashTable(ZSTD_MatchState_t* ms,
 }
 
 
+/* Keep a fingerprint in the high index bits. A failed fingerprint can
+ * decode to an arbitrary relative index: validate both ends of the prefix
+ * before reading, and always compare all eight candidate bytes. */
+#define ZSTD_DFAST_TAG_BITS 12
+FORCE_INLINE_TEMPLATE int ZSTD_dfastValidLong(U32 index, U32 current, U32 low, int strict, int tagged)
+{
+    if (tagged) return current-index-1 < current-low-(U32)strict;
+    return strict ? index > low : index >= low;
+}
+FORCE_INLINE_TEMPLATE U32 ZSTD_dfastLoadLong(const U32* table, size_t hash, int tagged)
+{
+    return tagged ? table[hash >> ZSTD_DFAST_TAG_BITS] ^ ((U32)hash << (32-ZSTD_DFAST_TAG_BITS)) : table[hash];
+}
+FORCE_INLINE_TEMPLATE void ZSTD_dfastSaveLong(U32* table, size_t hash, U32 index, int tagged)
+{
+    if (tagged) table[hash >> ZSTD_DFAST_TAG_BITS] = index ^ ((U32)hash << (32-ZSTD_DFAST_TAG_BITS));
+    else table[hash] = index;
+}
+
 FORCE_INLINE_TEMPLATE
 ZSTD_ALLOW_POINTER_OVERFLOW_ATTR
 size_t ZSTD_compressBlock_doubleFast_noDict_generic(
         ZSTD_MatchState_t* ms, SeqStore_t* seqStore, U32 rep[ZSTD_REP_NUM],
         void const* src, size_t srcSize, U32 const mls /* template */,
         U32 const hBitsL, U32 const hBitsS,
-        int const swapTables, int const longMode, int const tuned)
+        int const swapTables, int const longMode, int const tuned, int const tagged)
 {
     ZSTD_compressionParameters const* cParams = &ms->cParams;
     U32* const hashLong = swapTables ? ms->chainTable : ms->hashTable;
     U32* const hashSmall = swapTables ? ms->hashTable : ms->chainTable;
     const BYTE* const base = ms->window.base;
+    U32 const longBaseIndex = tagged ? ms->dfastTagOrigin : 0;
+    const BYTE* const longBase = base + longBaseIndex;
     const BYTE* const istart = (const BYTE*)src;
     const BYTE* anchor = istart;
     const U32 endIndex = (U32)((size_t)(istart - base) + srcSize);
     /* presumes that, if there is a dictionary, it must be using Attach mode */
     const U32 prefixLowestIndex = ZSTD_getLowestPrefixIndex(ms, endIndex, cParams->windowLog);
+    U32 const longLowestIndex = prefixLowestIndex - longBaseIndex;
     const BYTE* const prefixLowest = base + prefixLowestIndex;
     const BYTE* const iend = istart + srcSize;
     const BYTE* const ilimit = iend - HASH_READ_SIZE;
@@ -158,9 +180,11 @@ size_t ZSTD_compressBlock_doubleFast_noDict_generic(
     size_t mLength;
     U32 offset;
     U32 curr;
+    U32 currLong;
 
     /* how many positions to search before increasing step size */
-    const size_t kStepIncr = (size_t)1 << (tuned ? 7 : kSearchStrength);
+    const size_t kStepIncr = (tuned && swapTables) ? 112
+                          : (size_t)1 << (tuned ? 7 : kSearchStrength);
     /* the position at which to increment the step size if no match is found */
     const BYTE* nextStep;
     size_t step; /* the current step size */
@@ -184,6 +208,8 @@ size_t ZSTD_compressBlock_doubleFast_noDict_generic(
     const BYTE dummy[] = {0x12,0x34,0x56,0x78,0x9a,0xbc,0xde,0xf0,0xe2,0xb4};
 
     DEBUGLOG(5, "ZSTD_compressBlock_doubleFast_noDict_generic");
+    assert(!tagged || (ms->dfastMode & ZSTD_DFAST_TAG_ACTIVE));
+    assert(!tagged || prefixLowestIndex >= longBaseIndex + ZSTD_WINDOW_START_INDEX);
 
     /* init */
     ip += ((ip - prefixLowest) == 0);
@@ -206,32 +232,33 @@ size_t ZSTD_compressBlock_doubleFast_noDict_generic(
         }
 
         if (tuned && MEM_64bits()) currentWord = MEM_read64(ip);
-        hl0 = ZSTD_hashPtr(ip, hBitsL, 8);
-        idxl0 = hashLong[hl0];
-        matchl0 = base + idxl0;
+        hl0 = ZSTD_hashPtr(ip, hBitsL+(tagged ? ZSTD_DFAST_TAG_BITS : 0), 8);
+        idxl0 = ZSTD_dfastLoadLong(hashLong, hl0, tagged);
+        matchl0 = longBase + idxl0;
 
         /* Inner Loop: one iteration per search / position */
         do {
             const size_t hs0 = ZSTD_hashPtr(ip, hBitsS, mls);
             const U32 idxs0 = hashSmall[hs0];
             curr = (U32)(ip-base);
+            currLong = (U32)(ip-longBase);
             matchs0 = base + idxs0;
 
-            hashLong[hl0] = hashSmall[hs0] = curr;   /* update hash tables */
+            hashSmall[hs0] = curr; ZSTD_dfastSaveLong(hashLong, hl0, currLong, tagged);   /* update hash tables */
 
             /* check noDict repcode */
             if ((offset_1 > 0) & (MEM_read32(ip+1-offset_1) == ((tuned && MEM_64bits()) ? (MEM_isLittleEndian() ? (U32)(currentWord>>8) : (U32)(currentWord>>24)) : MEM_read32(ip+1)))) {
                 mLength = ZSTD_dfastCount(ip+1+4, ip+1+4-offset_1, iend, longMode) + 4;
                 /* A cheap repeat is not necessarily the best match when a
                  * substantially longer regular match starts one byte earlier. */
-                if (tuned && mLength <= 32 && idxl0 > prefixLowestIndex && MEM_read64(matchl0) == MEM_read64(ip)) {
+                if (tuned && mLength <= 32 && ZSTD_dfastValidLong(idxl0, currLong, longLowestIndex, 1, tagged) && MEM_read64(matchl0) == MEM_read64(ip)) {
                     size_t const len = ZSTD_dfastCount(ip+8, matchl0+8, iend, longMode) + 8;
                     offset = (U32)(ip-matchl0);
                     /* Multiplication keeps the comparison integral without
                      * a division for the binary literal price. */
                     if (((int)len-(int)mLength-1)*(swapTables ? 6 : 4) > (int)ZSTD_highbit32(offset+1)) {
                         mLength = len;
-                        hl1 = ZSTD_hashPtr(ip1, hBitsL, 8);
+                        hl1 = ZSTD_hashPtr(ip1, hBitsL+(tagged ? ZSTD_DFAST_TAG_BITS : 0), 8);
                         while (((ip>anchor) & (matchl0>prefixLowest)) && (ip[-1] == matchl0[-1])) { ip--; matchl0--; mLength++; }
                         goto _match_found;
                     }
@@ -241,16 +268,17 @@ size_t ZSTD_compressBlock_doubleFast_noDict_generic(
                 goto _match_stored;
             }
 
-            hl1 = ZSTD_hashPtr(ip1, hBitsL, 8);
+            hl1 = ZSTD_hashPtr(ip1, hBitsL+(tagged ? ZSTD_DFAST_TAG_BITS : 0), 8);
 
-            /* idxl0 > prefixLowestIndex is a (somewhat) unpredictable branch.
+            /* ZSTD_dfastValidLong(idxl0, currLong, longLowestIndex, 1, tagged) is a (somewhat) unpredictable branch.
              * However expression below complies into conditional move. Since
-             * match is unlikely and we only *branch* on idxl0 > prefixLowestIndex
+             * match is unlikely and we only *branch* on ZSTD_dfastValidLong(idxl0, currLong, longLowestIndex, 1, tagged)
              * if there is a match, all branches become predictable. */
-            {   const BYTE*  const matchl0_safe = ZSTD_selectAddr(idxl0, prefixLowestIndex, matchl0, &dummy[0]);
+            {   const BYTE*  const matchl0_safe = ZSTD_selectAddr(idxl0, longLowestIndex, matchl0, &dummy[0]);
 
                 /* check prefix long match */
-                if ((!tuned || longMode) ? (MEM_read64(matchl0_safe) == MEM_read64(ip) && matchl0_safe == matchl0) : (idxl0 >= prefixLowestIndex && MEM_read64(matchl0) == MEM_read64(ip))) {
+                if (tagged ? (ZSTD_dfastValidLong(idxl0, currLong, longLowestIndex, 0, 1) && MEM_read64(matchl0) == MEM_read64(ip)) :
+                    ((!tuned || longMode) ? (MEM_read64(matchl0_safe) == MEM_read64(ip) && matchl0_safe == matchl0) : (idxl0 >= prefixLowestIndex && MEM_read64(matchl0) == MEM_read64(ip)))) {
                     mLength = ZSTD_dfastCount(ip+8, matchl0+8, iend, longMode) + 8;
                     offset = (U32)(ip-matchl0);
                     /* Include the current text match's backward extension
@@ -268,9 +296,9 @@ size_t ZSTD_compressBlock_doubleFast_noDict_generic(
                      * match is already long. Binary data benefits from a
                      * tighter limit than text. */
                     if (tuned && (mLength <= (swapTables ? 16 : 32))) {
-                        idxl1 = hashLong[hl1];
-                        matchl1 = base + idxl1;
-                        if (idxl1 > prefixLowestIndex && MEM_read64(matchl1) == MEM_read64(ip1)) {
+                        idxl1 = ZSTD_dfastLoadLong(hashLong, hl1, tagged);
+                        matchl1 = longBase + idxl1;
+                        if (ZSTD_dfastValidLong(idxl1, (U32)(ip1-longBase), longLowestIndex, 1, tagged) && MEM_read64(matchl1) == MEM_read64(ip1)) {
                             size_t const len = ZSTD_dfastCount(ip1+8, matchl1+8, iend, longMode) + 8;
                             if (((int)len-(int)mLength)*(swapTables ? 4 : 3) >
                                 (int)ZSTD_highbit32((U32)(ip1-matchl1)+3) - (int)ZSTD_highbit32(offset+3)
@@ -291,8 +319,8 @@ size_t ZSTD_compressBlock_doubleFast_noDict_generic(
                     goto _match_found;
             }   }
 
-            idxl1 = hashLong[hl1];
-            matchl1 = base + idxl1;
+            idxl1 = ZSTD_dfastLoadLong(hashLong, hl1, tagged);
+            matchl1 = longBase + idxl1;
 
             /* Same optimization as matchl0 above */
             matchs0_safe = ZSTD_selectAddr(idxs0, prefixLowestIndex, matchs0, &dummy[0]);
@@ -358,7 +386,7 @@ _search_next_long:
         offset = (U32)(ip - matchs0);
 
         /* check long match at +1 position */
-        if ((idxl1 > prefixLowestIndex) && (MEM_read64(matchl1) == MEM_read64(ip1))) {
+        if ((ZSTD_dfastValidLong(idxl1, (U32)(ip1-longBase), longLowestIndex, 1, tagged)) && (MEM_read64(matchl1) == MEM_read64(ip1))) {
             size_t const l1len = ZSTD_dfastCount(ip1+8, matchl1+8, iend, longMode) + 8;
             if (tuned ? (((int)l1len-(int)mLength)*(swapTables ? 4 : 3) >
                     (int)ZSTD_highbit32((U32)(ip1-matchl1)+3) - (int)ZSTD_highbit32(offset+3) + ((int)(ip1-ip)-2*(int)(ip1[-1] == matchl1[-1]))*(swapTables ? 4 : 3)) : l1len > mLength) {
@@ -386,7 +414,7 @@ _match_found: /* requires ip, offset, mLength */
              * more predictable test. The minmatch even if we take a short match is
              * 4 bytes, so as long as step, the distance between ip and ip1
              * (initially) is less than 4, we know ip1 < new ip. */
-            hashLong[hl1] = (U32)(ip1 - base);
+            ZSTD_dfastSaveLong(hashLong, hl1, (U32)(ip1-longBase), tagged);
         }
 
         ZSTD_storeSeq(seqStore, (size_t)(ip-anchor), anchor, iend, OFFSET_TO_OFFBASE(offset), mLength);
@@ -400,7 +428,7 @@ _match_stored:
             /* Complementary insertion */
             /* done after iLimit test, as candidates could be > iend-8 */
             {   U32 const indexToInsert = curr+2;
-                hashLong[ZSTD_hashPtr(base+indexToInsert, hBitsL, 8)] = indexToInsert;
+                ZSTD_dfastSaveLong(hashLong, ZSTD_hashPtr(base+indexToInsert, hBitsL+(tagged ? ZSTD_DFAST_TAG_BITS : 0), 8), currLong+2, tagged);
                 hashSmall[ZSTD_hashPtr(base+indexToInsert, hBitsS, mls)] = indexToInsert;
                 hashSmall[ZSTD_hashPtr(ip-1, hBitsS, mls)] = (U32)(ip-1-base);
                 /* Spread the extra insertions across longer text matches.
@@ -409,47 +437,47 @@ _match_stored:
                  * bytes. All inserted positions precede the next search,
                  * and the enclosing ilimit check makes the hash reads safe. */
                 if (tuned) {
-                    if (!swapTables && (size_t)(ip-(base+curr)) >= 16) {
-                        hashLong[ZSTD_hashPtr(base+curr+5, hBitsL, 8)] = curr+5;
-                        {   size_t const hl = ZSTD_hashPtr(base+curr+8, hBitsL, 8);
+                    if (!swapTables && (size_t)(ip-(base+curr)) >= 14) {
+                        ZSTD_dfastSaveLong(hashLong, ZSTD_hashPtr(base+curr+4, hBitsL+(tagged ? ZSTD_DFAST_TAG_BITS : 0), 8), currLong+4, tagged);
+                        {   size_t const hl = ZSTD_hashPtr(base+curr+8, hBitsL+(tagged ? ZSTD_DFAST_TAG_BITS : 0), 8);
                             size_t const hs = ZSTD_hashPtr(base+curr+8, hBitsS, mls);
-                            hashLong[hl] = curr+8;
+                            ZSTD_dfastSaveLong(hashLong, hl, currLong+8, tagged);
                             hashSmall[hs] = curr+8;
                         }
                         /* Measure the span from the original search position,
                          * before backward extension of the selected match. */
-                        {   size_t const hl7 = ZSTD_hashPtr(ip-7, hBitsL, 8);
-                            size_t const hl4 = ZSTD_hashPtr(ip-4, hBitsL, 8);
+                        {   size_t const hl7 = ZSTD_hashPtr(ip-7, hBitsL+(tagged ? ZSTD_DFAST_TAG_BITS : 0), 8);
+                            size_t const hl4 = ZSTD_hashPtr(ip-4, hBitsL+(tagged ? ZSTD_DFAST_TAG_BITS : 0), 8);
                             size_t const hs4 = ZSTD_hashPtr(ip-4, hBitsS, mls);
                             U32 const matchEndIndex = (U32)(ip-base);
-                            hashLong[hl7] = matchEndIndex-7;
-                            hashLong[hl4] = matchEndIndex-4;
+                            ZSTD_dfastSaveLong(hashLong, hl7, (U32)(ip-longBase)-7, tagged);
+                            ZSTD_dfastSaveLong(hashLong, hl4, (U32)(ip-longBase)-4, tagged);
                             hashSmall[hs4] = matchEndIndex-4;
                         }
                     } else {
-                        hashLong[ZSTD_hashPtr(base+curr+3, hBitsL, 8)] = curr+3;
+                        ZSTD_dfastSaveLong(hashLong, ZSTD_hashPtr(base+curr+3, hBitsL+(tagged ? ZSTD_DFAST_TAG_BITS : 0), 8), currLong+3, tagged);
                         if (base+curr+4 < ip) {
-                            size_t const hl = ZSTD_hashPtr(base+curr+4, hBitsL, 8);
+                            size_t const hl = ZSTD_hashPtr(base+curr+4, hBitsL+(tagged ? ZSTD_DFAST_TAG_BITS : 0), 8);
                             size_t const hs = ZSTD_hashPtr(base+curr+4, hBitsS, mls);
-                            hashLong[hl] = curr+4;
+                            ZSTD_dfastSaveLong(hashLong, hl, currLong+4, tagged);
                             hashSmall[hs] = curr+4;
                         }
                         if (!swapTables && base+curr+6 < ip) {
                             /* One bound covers both extra positions. */
-                            hashLong[ZSTD_hashPtr(base+curr+5, hBitsL, 8)] = curr+5;
-                            {   size_t const hl = ZSTD_hashPtr(base+curr+6, hBitsL, 8);
+                            ZSTD_dfastSaveLong(hashLong, ZSTD_hashPtr(base+curr+5, hBitsL+(tagged ? ZSTD_DFAST_TAG_BITS : 0), 8), currLong+5, tagged);
+                            {   size_t const hl = ZSTD_hashPtr(base+curr+6, hBitsL+(tagged ? ZSTD_DFAST_TAG_BITS : 0), 8);
                                 size_t const hs = ZSTD_hashPtr(base+curr+6, hBitsS, mls);
-                                hashLong[hl] = curr+6;
+                                ZSTD_dfastSaveLong(hashLong, hl, currLong+6, tagged);
                                 hashSmall[hs] = curr+6;
                             }
                         } else {
                             if ((!swapTables || (size_t)(ip-(base+curr))>8) && base+curr+5 < ip) {
-                                hashLong[ZSTD_hashPtr(base+curr+5, hBitsL, 8)] = curr+5;
+                                ZSTD_dfastSaveLong(hashLong, ZSTD_hashPtr(base+curr+5, hBitsL+(tagged ? ZSTD_DFAST_TAG_BITS : 0), 8), currLong+5, tagged);
                             }
                             if ((!swapTables || (size_t)(ip-(base+curr))>8) && base+curr+6 < ip) {
-                                size_t const hl = ZSTD_hashPtr(base+curr+6, hBitsL, 8);
+                                size_t const hl = ZSTD_hashPtr(base+curr+6, hBitsL+(tagged ? ZSTD_DFAST_TAG_BITS : 0), 8);
                                 size_t const hs = ZSTD_hashPtr(base+curr+6, hBitsS, mls);
-                                hashLong[hl] = curr+6;
+                                ZSTD_dfastSaveLong(hashLong, hl, currLong+6, tagged);
                                 hashSmall[hs] = curr+6;
                             }
                         }
@@ -457,7 +485,7 @@ _match_stored:
                 }
                 /* Give the end-of-match candidate priority when a
                  * complementary insertion maps to the same long-hash bucket. */
-                hashLong[ZSTD_hashPtr(ip-2, hBitsL, 8)] = (U32)(ip-2-base);
+                ZSTD_dfastSaveLong(hashLong, ZSTD_hashPtr(ip-2, hBitsL+(tagged ? ZSTD_DFAST_TAG_BITS : 0), 8), (U32)(ip-longBase)-2, tagged);
             }
 
             /* check immediate repcode */
@@ -468,7 +496,7 @@ _match_stored:
                 size_t const rLength = ZSTD_dfastCount(ip+4, ip+4-offset_2, iend, longMode) + 4;
                 U32 const tmpOff = offset_2; offset_2 = offset_1; offset_1 = tmpOff;  /* swap offset_2 <=> offset_1 */
                 hashSmall[ZSTD_hashPtr(ip, hBitsS, mls)] = (U32)(ip-base);
-                hashLong[ZSTD_hashPtr(ip, hBitsL, 8)] = (U32)(ip-base);
+                ZSTD_dfastSaveLong(hashLong, ZSTD_hashPtr(ip, hBitsL+(tagged ? ZSTD_DFAST_TAG_BITS : 0), 8), (U32)(ip-longBase), tagged);
                 ZSTD_storeSeqOnly(seqStore, 0, REPCODE1_TO_OFFBASE, rLength);
                 ip += rLength;
                 anchor = ip;
@@ -714,7 +742,7 @@ _match_stored:
     static size_t ZSTD_compressBlock_doubleFast_noDict_##mls( \
         ZSTD_MatchState_t* ms, SeqStore_t* ss, U32 rep[ZSTD_REP_NUM], \
         void const* src, size_t size) { \
-        return ZSTD_compressBlock_doubleFast_noDict_generic(ms,ss,rep,src,size,mls,ms->cParams.hashLog,ms->cParams.chainLog,0,0,0); \
+        return ZSTD_compressBlock_doubleFast_noDict_generic(ms,ss,rep,src,size,mls,ms->cParams.hashLog,ms->cParams.chainLog,0,0,0,0); \
     }
 ZSTD_GEN_DFAST_NODICT(4)
 ZSTD_GEN_DFAST_NODICT(5)
@@ -733,33 +761,44 @@ ZSTD_GEN_DFAST_FN(dictMatchState, 7)
 FORCE_NOINLINE size_t ZSTD_compressBlock_doubleFast_special(
         ZSTD_MatchState_t* ms, SeqStore_t* ss, U32 rep[ZSTD_REP_NUM],
         void const* src, size_t size) {
-    return ZSTD_compressBlock_doubleFast_noDict_generic(ms,ss,rep,src,size,5,17,16,0,0,1);
+    return ZSTD_compressBlock_doubleFast_noDict_generic(ms,ss,rep,src,size,5,17,16,0,0,1,0);
 }
 FORCE_NOINLINE size_t ZSTD_compressBlock_doubleFast_specialLong(
         ZSTD_MatchState_t* ms, SeqStore_t* ss, U32 rep[ZSTD_REP_NUM],
         void const* src, size_t size) {
-    return ZSTD_compressBlock_doubleFast_noDict_generic(ms,ss,rep,src,size,5,17,16,0,1,1);
+    return ZSTD_compressBlock_doubleFast_noDict_generic(ms,ss,rep,src,size,5,17,16,0,1,1,0);
 }
 
 FORCE_NOINLINE size_t ZSTD_compressBlock_doubleFast_text(
         ZSTD_MatchState_t* ms, SeqStore_t* ss, U32 rep[ZSTD_REP_NUM],
         void const* src, size_t size) {
-    return ZSTD_compressBlock_doubleFast_noDict_generic(ms,ss,rep,src,size,6,17,16,0,0,1);
+    return ZSTD_compressBlock_doubleFast_noDict_generic(ms,ss,rep,src,size,6,17,16,0,0,1,0);
 }
 FORCE_NOINLINE size_t ZSTD_compressBlock_doubleFast_textLong(
         ZSTD_MatchState_t* ms, SeqStore_t* ss, U32 rep[ZSTD_REP_NUM],
         void const* src, size_t size) {
-    return ZSTD_compressBlock_doubleFast_noDict_generic(ms,ss,rep,src,size,6,17,16,0,1,1);
+    return ZSTD_compressBlock_doubleFast_noDict_generic(ms,ss,rep,src,size,6,17,16,0,1,1,0);
 }
 FORCE_NOINLINE size_t ZSTD_compressBlock_doubleFast_binary(
         ZSTD_MatchState_t* ms, SeqStore_t* ss, U32 rep[ZSTD_REP_NUM],
         void const* src, size_t size) {
-    return ZSTD_compressBlock_doubleFast_noDict_generic(ms,ss,rep,src,size,5,16,17,1,0,1);
+    return ZSTD_compressBlock_doubleFast_noDict_generic(ms,ss,rep,src,size,5,16,17,1,0,1,0);
 }
 FORCE_NOINLINE size_t ZSTD_compressBlock_doubleFast_binaryLong(
         ZSTD_MatchState_t* ms, SeqStore_t* ss, U32 rep[ZSTD_REP_NUM],
         void const* src, size_t size) {
-    return ZSTD_compressBlock_doubleFast_noDict_generic(ms,ss,rep,src,size,5,16,17,1,1,1);
+    return ZSTD_compressBlock_doubleFast_noDict_generic(ms,ss,rep,src,size,5,16,17,1,1,1,0);
+}
+
+FORCE_NOINLINE size_t ZSTD_compressBlock_doubleFast_taggedText(
+        ZSTD_MatchState_t* ms, SeqStore_t* ss, U32 rep[ZSTD_REP_NUM],
+        void const* src, size_t size) {
+    return ZSTD_compressBlock_doubleFast_noDict_generic(ms,ss,rep,src,size,6,17,16,0,0,1,1);
+}
+FORCE_NOINLINE size_t ZSTD_compressBlock_doubleFast_taggedTextLong(
+        ZSTD_MatchState_t* ms, SeqStore_t* ss, U32 rep[ZSTD_REP_NUM],
+        void const* src, size_t size) {
+    return ZSTD_compressBlock_doubleFast_noDict_generic(ms,ss,rep,src,size,6,17,16,0,1,1,1);
 }
 
 size_t ZSTD_compressBlock_doubleFast(
@@ -771,8 +810,8 @@ size_t ZSTD_compressBlock_doubleFast(
         /* Choose a short hash and table layout once per frame. Keep this
          * choice stable, including when a later block has different contents.
          * Dictionary tables retain their original interpretation. */
-        if (ms->dfastMode == 0) {
-            ms->dfastMode = 1;
+        if ((ms->dfastMode & 3) == 0) {
+            ms->dfastMode = (ms->dfastMode & ZSTD_DFAST_TAG_MASK) | 1;
             if (!ms->loadedDictEnd && !ms->dictMatchState && ms->window.dictLimit == ms->window.lowLimit && srcSize >= 4096) {
                 const BYTE* const p = (const BYTE*)src;
                 /* An odd stride avoids sampling just one column of records. */
@@ -783,8 +822,12 @@ size_t ZSTD_compressBlock_doubleFast(
                     text += (c>=32 && c<127) || c==9 || c==10 || c==13;
                     ++samples;
                 }
-                ms->dfastMode = text*4 >= samples*3 ? 2 : 3;
+                ms->dfastMode = (ms->dfastMode & ZSTD_DFAST_TAG_MASK) | (text*4 >= samples*3 ? 2 : 3);
             }
+        }
+        if (ms->dfastMode == (ZSTD_DFAST_TAG_PERMITTED | 2)) {
+            ZSTD_memset(ms->hashTable, 0, ((size_t)1 << ms->cParams.hashLog)*sizeof(U32));
+            ms->dfastMode |= ZSTD_DFAST_TAG_ACTIVE;
         }
         {
             U32 const mode = ms->dfastMode & 3;
@@ -792,7 +835,10 @@ size_t ZSTD_compressBlock_doubleFast(
             SeqDef* const seqBegin = seqStore->sequences;
             BYTE* const litBegin = seqStore->lit;
             size_t result;
-            if (mode == 2) result = longMode ?
+            if (ms->dfastMode & ZSTD_DFAST_TAG_ACTIVE) result = longMode ?
+                ZSTD_compressBlock_doubleFast_taggedTextLong(ms,seqStore,rep,src,srcSize) :
+                ZSTD_compressBlock_doubleFast_taggedText(ms,seqStore,rep,src,srcSize);
+            else if (mode == 2) result = longMode ?
                 ZSTD_compressBlock_doubleFast_textLong(ms,seqStore,rep,src,srcSize) :
                 ZSTD_compressBlock_doubleFast_text(ms,seqStore,rep,src,srcSize);
             else if (mode == 3) result = longMode ?
@@ -807,7 +853,7 @@ size_t ZSTD_compressBlock_doubleFast(
                 /* Long-match blocks leave more stale hash entries. Use the
                  * branchless validity checks and wide counter in that case.
                  * This selection affects speed only, not the parse. */
-                ms->dfastMode = mode | ((n && matched >= n*24) ? 4 : 0);
+                ms->dfastMode = (ms->dfastMode & ZSTD_DFAST_TAG_MASK) | mode | ((n && matched >= n*24) ? 4 : 0);
             }
             return result;
         }

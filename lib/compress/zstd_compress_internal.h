@@ -267,6 +267,11 @@ typedef struct {
 
 typedef struct ZSTD_MatchState_t ZSTD_MatchState_t;
 
+/* Temporary double-fast flags, confined to a single frame-chunk call. */
+#define ZSTD_DFAST_TAG_PERMITTED 8
+#define ZSTD_DFAST_TAG_ACTIVE 16
+#define ZSTD_DFAST_TAG_MASK (ZSTD_DFAST_TAG_PERMITTED | ZSTD_DFAST_TAG_ACTIVE)
+
 #define ZSTD_ROW_HASH_CACHE_SIZE 8       /* Size of prefetching hash cache for row-based matchfinder */
 
 struct ZSTD_MatchState_t {
@@ -286,7 +291,7 @@ struct ZSTD_MatchState_t {
     U32 hashCache[ZSTD_ROW_HASH_CACHE_SIZE]; /* For row-based matchFinder: a cache of hashes to improve speed */
     U64 hashSalt;                            /* For row-based matchFinder: salts the hash for reuse of tag table */
     U32 hashSaltEntropy;                     /* For row-based matchFinder: collects entropy for salt generation */
-    U32 dfastMode;                           /* Double-fast: layout (bits 0-1), long matches (bit 2). */
+    U32 dfastMode;                           /* Layout (bits 0-1), long matches (bit 2), temporary tag flags. */
 
     U32* hashTable;
     U32* hashTable3;
@@ -300,6 +305,8 @@ struct ZSTD_MatchState_t {
     optState_t opt;         /* optimal parser state */
     const ZSTD_MatchState_t* dictMatchState;
     ZSTD_compressionParameters cParams;
+    U32 dfastTagOrigin; /* Frame-chunk-relative long-table origin, valid only
+                         * with ZSTD_DFAST_TAG_ACTIVE. Uses 64-bit padding. */
     const RawSeqStore_t* ldmSeqStore;
 
     /* Controls prefetching in some dictMatchState matchfinders.

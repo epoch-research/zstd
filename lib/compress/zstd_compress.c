@@ -2014,6 +2014,7 @@ ZSTD_reset_matchState(ZSTD_MatchState_t* ms,
     ms->hashLog3 = hashLog3;
     ms->lazySkipping = 0;
     ms->dfastMode = 0;
+    ms->dfastTagOrigin = 0;
 
     ZSTD_invalidateMatchState(ms);
 
@@ -4740,6 +4741,7 @@ static void ZSTD_overflowCorrectIfNeeded(ZSTD_MatchState_t* ms,
     U32 const maxDist = (U32)1 << params->cParams.windowLog;
     if (ZSTD_window_needOverflowCorrection(ms->window, cycleLog, maxDist, ms->loadedDictEnd, ip, iend)) {
         U32 const correction = ZSTD_window_correctOverflow(&ms->window, cycleLog, maxDist, ip);
+        assert(!(ms->dfastMode & ZSTD_DFAST_TAG_ACTIVE));
         ZSTD_STATIC_ASSERT(ZSTD_CHAINLOG_MAX <= 30);
         ZSTD_STATIC_ASSERT(ZSTD_WINDOWLOG_MAX_32 <= 30);
         ZSTD_STATIC_ASSERT(ZSTD_WINDOWLOG_MAX <= 31);
@@ -4809,7 +4811,7 @@ static size_t ZSTD_optimalBlockSize(ZSTD_CCtx* cctx, const void* src, size_t src
 *   Frame is supposed already started (header already produced)
 *  @return : compressed size, or an error code
 */
-static size_t ZSTD_compress_frameChunk(ZSTD_CCtx* cctx,
+static size_t ZSTD_compress_frameChunk_body(ZSTD_CCtx* cctx,
                                      void* dst, size_t dstCapacity,
                                const void* src, size_t srcSize,
                                      U32 lastFrameChunk)
@@ -4910,6 +4912,45 @@ static size_t ZSTD_compress_frameChunk(ZSTD_CCtx* cctx,
 
     if (lastFrameChunk && (op>ostart)) cctx->stage = ZSTDcs_ending;
     return (size_t)(op-ostart);
+}
+
+
+/* Tagged tables are confined to one contiguous final frame chunk with no
+ * dictionary or input history, external sequence producer, or LDM. The
+ * index bound guarantees that overflow correction cannot run in its body.
+ * No encoded entry survives this call, including any compression error.
+ * Use a stable chunk-relative origin, independent of CCtx index reuse. */
+static size_t ZSTD_compress_frameChunk(ZSTD_CCtx* cctx,
+                                     void* dst, size_t dstCapacity,
+                               const void* src, size_t srcSize,
+                                     U32 lastFrameChunk)
+{
+    ZSTD_MatchState_t* const ms = &cctx->blockState.matchState;
+    ZSTD_compressionParameters const* const cp = &cctx->appliedParams.cParams;
+    size_t result;
+    assert((ms->dfastMode & ZSTD_DFAST_TAG_MASK) == 0);
+    if (MEM_64bits() && !ZSTD_WINDOW_OVERFLOW_CORRECT_FREQUENTLY
+        && lastFrameChunk && cctx->isFirstBlock && ms->dfastMode == 0
+        && srcSize >= 1 MB && srcSize <= 1 GB
+        && cp->strategy == ZSTD_dfast && cp->hashLog == 17
+        && cp->chainLog == 16 && cp->minMatch == 5 && cp->windowLog <= 23
+        && cctx->appliedParams.ldmParams.enableLdm != ZSTD_ps_enable
+        && cctx->externSeqStore.size == 0 && !ZSTD_hasExtSeqProd(&cctx->appliedParams)
+        && !ms->loadedDictEnd && !ms->dictMatchState
+        && ms->window.dictLimit == ms->window.lowLimit
+        && (size_t)((const BYTE*)src - ms->window.base) == ms->window.dictLimit
+        && (U64)ms->window.dictLimit + srcSize <= ZSTD_CURRENT_MAX) {
+        assert(ms->window.dictLimit >= ZSTD_WINDOW_START_INDEX);
+        ms->dfastTagOrigin = ms->window.dictLimit - ZSTD_WINDOW_START_INDEX;
+        ms->dfastMode = ZSTD_DFAST_TAG_PERMITTED;
+    }
+    result = ZSTD_compress_frameChunk_body(cctx, dst, dstCapacity, src, srcSize, lastFrameChunk);
+    if (ms->dfastMode & ZSTD_DFAST_TAG_ACTIVE) {
+        ZSTD_memset(ms->hashTable, 0, ((size_t)1 << ms->cParams.hashLog)*sizeof(U32));
+    }
+    ms->dfastMode &= ~(U32)ZSTD_DFAST_TAG_MASK;
+    ms->dfastTagOrigin = 0;
+    return result;
 }
 
 
