@@ -8,6 +8,7 @@
  * You may select, at your option, one of the above-listed licenses.
  */
 
+#include "../common/bits.h" /* ZSTD_highbit32 */
 #include "../common/compiler.h" /* ZSTD_ALIGNOF */
 #include "../common/mem.h" /* S64 */
 #include "../common/zstd_deps.h" /* ZSTD_memset */
@@ -229,6 +230,91 @@ static size_t ZSTD_splitBlock_fromBorders(const void* blockStart, size_t blockSi
     }
 }
 
+/* round(256 * log2(1 + i/256)), for i in [0, 255]. */
+static const BYTE ZSTD_splitLogFraction[256] = {
+    0, 1, 3, 4, 6, 7, 9, 10, 11, 13, 14, 16, 17, 18, 20, 21,
+    22, 24, 25, 26, 28, 29, 30, 32, 33, 34, 36, 37, 38, 40, 41, 42,
+    44, 45, 46, 47, 49, 50, 51, 52, 54, 55, 56, 57, 59, 60, 61, 62,
+    63, 65, 66, 67, 68, 69, 71, 72, 73, 74, 75, 77, 78, 79, 80, 81,
+    82, 84, 85, 86, 87, 88, 89, 90, 92, 93, 94, 95, 96, 97, 98, 99,
+    100, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 114, 116, 117,
+    118, 119, 120, 121, 122, 123, 124, 125, 126, 127, 128, 129, 130, 131, 132, 133,
+    134, 135, 136, 137, 138, 139, 140, 141, 142, 143, 144, 145, 146, 147, 148, 149,
+    150, 151, 152, 153, 154, 155, 155, 156, 157, 158, 159, 160, 161, 162, 163, 164,
+    165, 166, 167, 168, 169, 169, 170, 171, 172, 173, 174, 175, 176, 177, 178, 178,
+    179, 180, 181, 182, 183, 184, 185, 185, 186, 187, 188, 189, 190, 191, 192, 192,
+    193, 194, 195, 196, 197, 198, 198, 199, 200, 201, 202, 203, 203, 204, 205, 206,
+    207, 208, 208, 209, 210, 211, 212, 212, 213, 214, 215, 216, 216, 217, 218, 219,
+    220, 220, 221, 222, 223, 224, 224, 225, 226, 227, 228, 228, 229, 230, 231, 231,
+    232, 233, 234, 234, 235, 236, 237, 238, 238, 239, 240, 241, 241, 242, 243, 244,
+    244, 245, 246, 247, 247, 248, 249, 249, 250, 251, 252, 252, 253, 254, 255, 255,
+};
+
+/* Fixed-point log2 with eight fractional bits. All arguments are small
+ * histogram counts, so the normalization shift cannot overflow. */
+MEM_STATIC int ZSTD_splitLog256(U32 value)
+{
+    U32 log;
+    assert(value > 0 && value < (1U << 24));
+    log = ZSTD_highbit32(value);
+    return (int)(log*256 + ZSTD_splitLogFraction[((value<<8)>>log)-256]);
+}
+
+/* Locate the transition more precisely than the 8 KiB fingerprint grid.
+ * Compare the likelihood of samples on either side of the proposed split
+ * under the past and current distributions. One-count smoothing keeps
+ * missing symbols finite and regularizes these small fingerprints.
+ * The best boundary minimizes the cumulative cost of using the past model.
+ * Require four bits of improvement over the grid boundary, and eight bits
+ * of evidence after the minimum before accepting it.
+ *
+ * ref already includes the current histogram: subtract it to recover the
+ * past distribution. The price cache uses unused space after the four
+ * temporary histograms, within the existing splitting workspace. */
+static size_t ZSTD_refineSplitFast(const BYTE* src, size_t pos,
+        const U16* ref, U16* hist, U32 k)
+{
+    enum { span = CHUNKSIZE/2, priceUnset = -32640 };
+    U32 const samples = (CHUNKSIZE+41)/43;
+    S16* const prices = (S16*)(hist + 4*256);
+    int const constant = ZSTD_splitLog256(k*samples+256)
+                       - ZSTD_splitLog256(samples+256);
+    int sum = 0, minimum = 0, original = 0, seen = 0, confirmed = 0;
+    size_t best = 0, n;
+    const BYTE* const p = src+pos-span;
+    ZSTD_STATIC_ASSERT(CHUNKSIZE == 8 KB);
+    ZSTD_STATIC_ASSERT(CHUNKSIZE/2 >= BLOCKSIZE_MIN);
+    assert(pos >= CHUNKSIZE && pos <= 128 KB-CHUNKSIZE);
+    /* Signed 0x8080 is outside the range of any valid price. */
+    ZSTD_memset(prices, 0x80, 256*sizeof(*prices));
+    for (n = 0; n*43 < 2*span; ++n) {
+        unsigned const symbol = p[n*43];
+        int price = prices[symbol];
+        if (price == priceUnset) {
+            U32 const current = hist[symbol] + hist[256+symbol]
+                              + hist[512+symbol] + hist[768+symbol];
+            U32 const previous = ref[symbol] - current;
+            assert(ref[symbol] >= current);
+            price = constant + ZSTD_splitLog256(current+1)
+                             - ZSTD_splitLog256(previous+1);
+            assert(price > priceUnset && price < 32768);
+            prices[symbol] = (S16)price;
+        }
+        sum += price;
+        if (sum < minimum) { minimum = sum; best = n+1; }
+        if (!seen && (n+1)*43 >= span) { original = sum; seen = 1; }
+        if (seen && sum-minimum >= 8*256) { confirmed = 1; break; }
+    }
+    if (confirmed && original-minimum >= 4*256) {
+        /* Midpoint between the last old and first new sample, rounded to
+         * 64 bytes. Even at either end, leave at least 4 KiB in each block. */
+        size_t const delta = (best*43+11) & ~(size_t)63;
+        assert(delta <= 2*span);
+        return pos-span+delta;
+    }
+    return pos;
+}
+
 /* The byte fingerprints at sampling rate 43 have fewer than 3072 samples
  * in a full block. 16-bit counters are sufficient, including the weighted
  * differences and their sum. Cancel the common nbEvents factor before
@@ -251,10 +337,10 @@ ZSTD_splitBlock_fastChunks(const void* blockStart, size_t blockSize,
     /* Match recordFingerprint_generic's convention (floor, not ceil). */
     const U32 events = (CHUNKSIZE-1)/43;
     ZSTD_STATIC_ASSERT(HASHLENGTH == 2);
-    ZSTD_STATIC_ASSERT(ZSTD_SLIPBLOCK_WORKSPACESIZE >= 5*256*sizeof(U16));
+    ZSTD_STATIC_ASSERT(ZSTD_SLIPBLOCK_WORKSPACESIZE >= 6*256*sizeof(U16));
     ZSTD_STATIC_ASSERT(2 * (128 KB / 43 + 128 KB / CHUNKSIZE) < 32768);
     assert(blockSize == 128 KB);
-    assert(wkspSize >= (4+1)*256*sizeof(U16));
+    assert(wkspSize >= (4+2)*256*sizeof(U16));
     (void)wkspSize;
     ZSTD_memset(ref,0,256*sizeof(U16));
     for (n=0; n<CHUNKSIZE-1; n+=43) ref[p[n]]++;
@@ -304,7 +390,7 @@ ZSTD_splitBlock_fastChunks(const void* blockStart, size_t blockSize,
             ref[i] = (U16)(ref[i]+cur);
         }
 #endif
-        if (distance >= threshold) return pos;
+        if (distance >= threshold) return ZSTD_refineSplitFast(p,pos,ref,hist,k);
         if (penalty>0) --penalty;
     }
     return blockSize;
