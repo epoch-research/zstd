@@ -740,6 +740,31 @@ _match_stored:
                 anchor = ip;
                 continue;   /* faster when present ... (?) */
             }
+            /* In identifier text, a one-byte record-size change after a
+             * longer match can expose the zero-literal first-repeat-minus-one
+             * code. Require eight bytes to avoid fragmenting short matches.
+             * This offset is smaller than an already valid repeat; exclude
+             * zero. ip <= ilimit bounds both full-width candidate reads. */
+            if (UNLIKELY(tagged && (!swapTables && mls == 5) && mLength >= 16 && ip <= ilimit && offset_1 > 1 &&
+                MEM_read64(ip-offset_1+1) == MEM_read64(ip))) {
+                U32 const rOffset = offset_1-1;
+                size_t const rLength = ZSTD_dfastCount(ip+8, ip+8-rOffset, iend, longMode)+8;
+                /* The special repeat shifts history just like a new offset. */
+                offset_3 = offset_2;
+                offset_2 = offset_1;
+                offset_1 = rOffset;
+                ZSTD_dfastSaveShort(hashSmall, ZSTD_hashPtr(ip, hBitsS+ZSTD_DFAST_SHORT_TAG_BITS, mls), (U32)(ip-longBase), tagged);
+                ZSTD_dfastSaveLong(hashLong, ZSTD_hashPtr(ip, hBitsL+ZSTD_DFAST_TAG_BITS, 8), (U32)(ip-longBase), tagged);
+                ZSTD_storeSeqOnly(seqStore, 0, REPCODE3_TO_OFFBASE, rLength);
+                if (rLength >= 32 && ip+rLength <= ilimit) {
+                    ZSTD_dfastSaveLong(hashLong, ZSTD_hashPtr(ip+2, hBitsL+ZSTD_DFAST_TAG_BITS, 8), (U32)(ip+2-longBase), tagged);
+                    ZSTD_dfastSaveShort(hashSmall, ZSTD_hashPtr(ip+2, hBitsS+ZSTD_DFAST_SHORT_TAG_BITS, mls), (U32)(ip+2-longBase), tagged);
+                    ZSTD_dfastSaveLong(hashLong, ZSTD_hashPtr(ip+rLength-2, hBitsL+ZSTD_DFAST_TAG_BITS, 8), (U32)(ip+rLength-2-longBase), tagged);
+                    ZSTD_dfastSaveShort(hashSmall, ZSTD_hashPtr(ip+rLength-1, hBitsS+ZSTD_DFAST_SHORT_TAG_BITS, mls), (U32)(ip+rLength-1-longBase), tagged);
+                }
+                ip += rLength;
+                anchor = ip;
+            }
         }
     }
 }
