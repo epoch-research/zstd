@@ -771,16 +771,16 @@ _check_immediate_repeat:
                  * The original longer-match gate applies to this whole run. */
                 goto _check_immediate_repeat;
             }
-            /* In prose, try a locally known third repeat when the second
-             * repeat missed at this boundary. A normal match of at least
+            /* Try a locally known third repeat at the match boundary.
+             * Prose requires an eight-byte prefix; binary long-match mode
+             * can also use four-byte repeats. A normal match of at least
              * eight bytes enables the check for this whole repeat run.
-             * Bound the offset before its candidate read, then require
-             * all eight bytes to match. */
-            if (tagged && (!swapTables && mls==6) && mLength >= 8 && ip <= ilimit) {
+             * Bound the offset before reading its candidate. */
+            if (tagged && ((!swapTables && mls==6 && mLength >= 8) || (swapTables && longMode && mLength >= 8)) && ip <= ilimit) {
                 U32 const rOffset = offset_3;
                 if (UNLIKELY(rOffset > 0 && rOffset <= (U32)(ip-prefixLowest) &&
-                    MEM_read64(ip-rOffset) == MEM_read64(ip))) {
-                    size_t const rLength = ZSTD_dfastCount(ip+8, ip+8-rOffset, iend, longMode)+8;
+                    (swapTables ? MEM_read32(ip-rOffset) == MEM_read32(ip) : MEM_read64(ip-rOffset) == MEM_read64(ip)))) {
+                    size_t const rLength = swapTables ? ZSTD_dfastCount(ip+4, ip+4-rOffset, iend, longMode)+4 : ZSTD_dfastCount(ip+8, ip+8-rOffset, iend, longMode)+8;
                     /* With zero literals, code two selects the third offset. */
                     offset_3 = offset_2;
                     offset_2 = offset_1;
