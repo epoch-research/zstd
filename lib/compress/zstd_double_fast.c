@@ -246,15 +246,18 @@ size_t ZSTD_compressBlock_doubleFast_noDict_generic(
                     mLength = ZSTD_dfastCount(ip+8, matchl0+8, iend, longMode) + 8;
                     offset = (U32)(ip-matchl0);
                     /* One lazy step, charging for the extra literals and for
-                     * any increase in the offset's encoding cost. On text,
-                     * avoid searching again after a sufficiently long match. */
+                     * any increase in the offset's encoding cost. A byte that
+                     * can be caught up backwards both extends the match and
+                     * removes a literal, so credit it twice in this estimate.
+                     * On text, avoid searching again after a long match. */
                     if (tuned && (swapTables || mLength <= 24)) {
                         idxl1 = hashLong[hl1];
                         matchl1 = base + idxl1;
                         if (idxl1 > prefixLowestIndex && MEM_read64(matchl1) == MEM_read64(ip1)) {
                             size_t const len = ZSTD_dfastCount(ip1+8, matchl1+8, iend, longMode) + 8;
                             if (((int)len-(int)mLength)*(swapTables ? 6 : 4) >
-                                (int)ZSTD_highbit32((U32)(ip1-matchl1)+3) - (int)ZSTD_highbit32(offset+3) + (int)(ip1-ip)*(swapTables ? 6 : 4)) {
+                                (int)ZSTD_highbit32((U32)(ip1-matchl1)+3) - (int)ZSTD_highbit32(offset+3)
+                                + ((int)(ip1-ip)-2*(int)(ip1[-1] == matchl1[-1]))*(swapTables ? 6 : 4)) {
                                 ip = ip1;
                                 mLength = len;
                                 matchl0 = matchl1;
@@ -316,7 +319,7 @@ _search_next_long:
         if ((idxl1 > prefixLowestIndex) && (MEM_read64(matchl1) == MEM_read64(ip1))) {
             size_t const l1len = ZSTD_dfastCount(ip1+8, matchl1+8, iend, longMode) + 8;
             if (tuned ? (((int)l1len-(int)mLength)*(swapTables ? 6 : 4) >
-                    (int)ZSTD_highbit32((U32)(ip1-matchl1)+3) - (int)ZSTD_highbit32(offset+3) + (int)(ip1-ip)*(swapTables ? 6 : 4)) : l1len > mLength) {
+                    (int)ZSTD_highbit32((U32)(ip1-matchl1)+3) - (int)ZSTD_highbit32(offset+3) + ((int)(ip1-ip)-2*(int)(ip1[-1] == matchl1[-1]))*(swapTables ? 6 : 4)) : l1len > mLength) {
                 /* use the long match instead */
                 ip = ip1;
                 mLength = l1len;
