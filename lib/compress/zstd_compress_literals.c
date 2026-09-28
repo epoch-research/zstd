@@ -162,7 +162,7 @@ size_t ZSTD_compressLiterals (
     {   HUF_repeat repeat = prevHuf->repeatMode;
         int const flags = 0
             | (bmi2 ? HUF_flags_bmi2 : 0)
-            | (strategy < ZSTD_lazy && srcSize <= 1024 ? HUF_flags_preferRepeat : 0)
+            | (strategy != ZSTD_dfast && strategy < ZSTD_lazy && srcSize <= 1024 ? HUF_flags_preferRepeat : 0)
             | (strategy >= HUF_OPTIMAL_DEPTH_THRESHOLD ? HUF_flags_optimalDepth : 0)
             | (suspectUncompressible ? HUF_flags_suspectUncompressible : 0);
 
