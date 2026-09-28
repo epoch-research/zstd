@@ -4320,13 +4320,55 @@ static const U16 ZSTD_splitSeqLog[129] = {
     1795,
 };
 
+/* round(256*n*log2(n)), with 0*log2(0) defined as zero. Each
+ * quarter contributes 128 samples, so pooled counts are at most 256. */
+static const U32 ZSTD_splitXlog[257] = {
+    0, 0, 512, 1217, 2048, 2972, 3971, 5031,
+    6144, 7304, 8504, 9742, 11013, 12315, 13646, 15002,
+    16384, 17789, 19215, 20662, 22128, 23613, 25116, 26635,
+    28170, 29721, 31286, 32866, 34459, 36066, 37685, 39317,
+    40960, 42615, 44281, 45958, 47646, 49344, 51052, 52769,
+    54497, 56233, 57978, 59732, 61495, 63266, 65045, 66833,
+    68628, 70431, 72241, 74059, 75884, 77716, 79556, 81402,
+    83254, 85114, 86979, 88851, 90730, 92614, 94505, 96402,
+    98304, 100212, 102126, 104046, 105971, 107901, 109837, 111778,
+    113724, 115675, 117632, 119593, 121560, 123531, 125507, 127488,
+    129473, 131463, 133458, 135457, 137460, 139468, 141481, 143497,
+    145518, 147543, 149572, 151606, 153643, 155684, 157730, 159779,
+    161832, 163889, 165950, 168014, 170083, 172155, 174230, 176310,
+    178393, 180479, 182569, 184662, 186759, 188859, 190963, 193070,
+    195180, 197294, 199411, 201531, 203655, 205781, 207911, 210044,
+    212180, 214319, 216461, 218606, 220754, 222905, 225059, 227216,
+    229376, 231539, 233704, 235873, 238044, 240218, 242395, 244575,
+    246757, 248942, 251130, 253320, 255514, 257709, 259908, 262109,
+    264312, 266518, 268727, 270938, 273152, 275368, 277587, 279808,
+    282031, 284257, 286486, 288717, 290950, 293185, 295423, 297664,
+    299906, 302151, 304398, 306648, 308899, 311153, 313410, 315668,
+    317929, 320192, 322457, 324724, 326993, 329265, 331538, 333814,
+    336092, 338372, 340654, 342938, 345225, 347513, 349803, 352096,
+    354390, 356686, 358985, 361285, 363587, 365892, 368198, 370506,
+    372816, 375128, 377442, 379758, 382076, 384395, 386717, 389040,
+    391365, 393693, 396021, 398352, 400685, 403019, 405355, 407693,
+    410033, 412375, 414718, 417063, 419410, 421758, 424109, 426461,
+    428814, 431170, 433527, 435886, 438246, 440608, 442972, 445338,
+    447705, 450074, 452444, 454816, 457190, 459565, 461942, 464321,
+    466701, 469083, 471466, 473851, 476238, 478626, 481015, 483407,
+    485799, 488194, 490589, 492987, 495386, 497786, 500188, 502591,
+    504996, 507402, 509810, 512220, 514630, 517043, 519456, 521871,
+    524288,
+};
+
 static size_t ZSTD_deriveBlockSplits_hist(ZSTD_CCtx* zc, U32 partitions[], U32 nbSeq)
 {
     unsigned* const front = (unsigned*)zc->tmpWorkspace;
     unsigned* const back = front + 128;
     SeqDef const* const seq = zc->seqStore.sequencesStart;
     U32 const quarter = nbSeq/4;
-    U32 i, diff=0;
+    U32 i, active=0;
+    /* Entropy saving in 1/256 bits over the 256 sampled sequences.
+     * Each of the three alphabets starts with N*log2(N)-2*n*log2(n),
+     * where N=256 and n=128. Signed arithmetic also permits roundoff. */
+    S32 gain=3*256*256;
     partitions[0] = nbSeq;
     if (nbSeq < 1024) return 0;
     /* Keep the three alphabets disjoint: literal lengths, match lengths,
@@ -4348,8 +4390,18 @@ static size_t ZSTD_deriveBlockSplits_hist(ZSTD_CCtx* zc, U32 partitions[], U32 n
         ++front[96+ZSTD_highbit32(a.offBase)];
         ++back[96+ZSTD_highbit32(b.offBase)];
     }
-    for (i=0; i<128; ++i) diff += front[i]>back[i] ? front[i]-back[i] : back[i]-front[i];
-    if (diff < 224) return 0;
+    for (i=0; i<128; ++i) {
+        U32 const a = front[i], b = back[i];
+        gain -= (S32)ZSTD_splitXlog[a+b] - (S32)ZSTD_splitXlog[a] - (S32)ZSTD_splitXlog[b];
+        active += (a+b) != 0;
+    }
+    assert(active >= 3);
+    /* Separate models overfit small samples. Discount 1.5 bits per
+     * additional observed symbol, then extrapolate to the whole block.
+     * Require an estimated 64-byte saving to cover another block and
+     * entropy tables. These are conservative estimates, not exact costs. */
+    gain -= (S32)((active-3)*384);
+    if (gain <= 0 || (U64)gain*nbSeq < (U64)64*8*65536) return 0;
     partitions[0] = nbSeq/2;
     {
         /* Reuse the front histogram for signed log-likelihood ratios.
