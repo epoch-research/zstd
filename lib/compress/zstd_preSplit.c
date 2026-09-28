@@ -15,6 +15,10 @@
 #include "hist.h" /* HIST_add */
 #include "zstd_preSplit.h"
 
+#if defined(__SSE2__)
+#include <emmintrin.h>
+#endif
+
 
 #define BLOCKSIZE_MIN 3500
 #define THRESHOLD_PENALTY_RATE 16
@@ -223,6 +227,97 @@ static size_t ZSTD_splitBlock_fromBorders(const void* blockStart, size_t blockSi
             return 64 KB;
         return (distFromBegin > distFromEnd) ? 32 KB : 96 KB;
     }
+}
+
+/* The byte fingerprints at sampling rate 43 have fewer than 3072 samples
+ * in a full block. 16-bit counters are sufficient, including the weighted
+ * differences and their sum. Cancel the common nbEvents factor before
+ * computing the distance; this gives the same decision as the full-width
+ * fingerprints. Four independent histograms shorten dependency chains on
+ * common bytes (notably spaces and zeroes).
+ *
+ * This is scratch space only. Merging a chunk before testing the distance
+ * is harmless even when that chunk turns out to be the split point. */
+static size_t
+ZSTD_splitBlock_fastChunks(const void* blockStart, size_t blockSize,
+                          void* workspace, size_t wkspSize)
+{
+    const BYTE* const p = (const BYTE*)blockStart;
+    U16* const ref = (U16*)workspace;
+    U16* const hist = ref+256;
+    size_t pos,n;
+    U32 k=1;
+    int penalty=THRESHOLD_PENALTY;
+    /* Match recordFingerprint_generic's convention (floor, not ceil). */
+    const U32 events = (CHUNKSIZE-1)/43;
+    ZSTD_STATIC_ASSERT(HASHLENGTH == 2);
+    ZSTD_STATIC_ASSERT(ZSTD_SLIPBLOCK_WORKSPACESIZE >= 5*256*sizeof(U16));
+    ZSTD_STATIC_ASSERT(2 * (128 KB / 43 + 128 KB / CHUNKSIZE) < 32768);
+    assert(blockSize == 128 KB);
+    assert(wkspSize >= (4+1)*256*sizeof(U16));
+    (void)wkspSize;
+    ZSTD_memset(ref,0,256*sizeof(U16));
+    for (n=0; n<CHUNKSIZE-1; n+=43) ref[p[n]]++;
+    for (pos=CHUNKSIZE; pos<=blockSize-CHUNKSIZE; pos+=CHUNKSIZE,++k) {
+        U32 distance=0;
+        /* nbEvents >= THRESHOLD_PENALTY_RATE makes this rounded-up,
+         * cancelled threshold equivalent to the original comparison. */
+        U32 const threshold = (k*events*(THRESHOLD_BASE+(U32)penalty)
+                              + THRESHOLD_PENALTY_RATE-1) / THRESHOLD_PENALTY_RATE;
+        const BYTE* const src=p+pos;
+        size_t i;
+        ZSTD_memset(hist,0,4*256*sizeof(U16));
+        for (n=0; n+4<=(CHUNKSIZE+41)/43; n+=4) {
+            hist[0*256 + src[(n+0)*43]]++;
+            hist[1*256 + src[(n+1)*43]]++;
+            hist[2*256 + src[(n+2)*43]]++;
+            hist[3*256 + src[(n+3)*43]]++;
+        }
+        for (; n<(CHUNKSIZE+41)/43; ++n) hist[src[n*43]]++;
+#if defined(__SSE2__)
+        {
+        __m128i acc = _mm_setzero_si128();
+        __m128i const mul = _mm_set1_epi16((short)k);
+        __m128i sum;
+        for (i=0;i<256;i+=8) {
+            __m128i const prev = _mm_loadu_si128((const __m128i*)(ref+i));
+            __m128i cur = _mm_loadu_si128((const __m128i*)(hist+i));
+            __m128i diff,sign;
+            cur = _mm_add_epi16(cur, _mm_loadu_si128((const __m128i*)(hist+1*256+i)));
+            cur = _mm_add_epi16(cur, _mm_loadu_si128((const __m128i*)(hist+2*256+i)));
+            cur = _mm_add_epi16(cur, _mm_loadu_si128((const __m128i*)(hist+3*256+i)));
+            diff = _mm_sub_epi16(prev,_mm_mullo_epi16(cur,mul));
+            sign = _mm_srai_epi16(diff,15);
+            acc = _mm_add_epi16(acc,_mm_sub_epi16(_mm_xor_si128(diff,sign),sign));
+            _mm_storeu_si128((__m128i*)(ref+i),_mm_add_epi16(prev,cur));
+        }
+        sum = _mm_madd_epi16(acc,_mm_set1_epi16(1));
+        sum = _mm_add_epi32(sum,_mm_srli_si128(sum,8));
+        sum = _mm_add_epi32(sum,_mm_srli_si128(sum,4));
+        distance = (U32)_mm_cvtsi128_si32(sum);
+        }
+#else
+        for (i=0;i<256;++i) {
+            U32 const cur = hist[0*256+i] + hist[1*256+i] + hist[2*256+i] + hist[3*256+i];
+            S32 const diff = (S32)ref[i] - (S32)(cur*k);
+            distance += (U32)(diff<0 ? -diff : diff);
+            ref[i] = (U16)(ref[i]+cur);
+        }
+#endif
+        if (distance >= threshold) return pos;
+        if (penalty>0) --penalty;
+    }
+    return blockSize;
+}
+
+/* Refine the cheap estimate only when the borders indicate a change. */
+size_t ZSTD_splitBlock_fast(const void* blockStart, size_t blockSize,
+                           void* workspace, size_t wkspSize)
+{
+    size_t const coarse = ZSTD_splitBlock_fromBorders(blockStart, blockSize,
+                                                     workspace, wkspSize);
+    if (coarse == blockSize) return blockSize;
+    return ZSTD_splitBlock_fastChunks(blockStart, blockSize, workspace, wkspSize);
 }
 
 size_t ZSTD_splitBlock(const void* blockStart, size_t blockSize,

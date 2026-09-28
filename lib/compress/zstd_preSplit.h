@@ -30,4 +30,9 @@ size_t ZSTD_splitBlock(const void* blockStart, size_t blockSize,
                     int level,
                     void* workspace, size_t wkspSize);
 
+/* Cheap distribution-change detection, with a finer search near changes.
+ * Like ZSTD_splitBlock(), this operates on a full 128 KB block. */
+size_t ZSTD_splitBlock_fast(const void* blockStart, size_t blockSize,
+                           void* workspace, size_t wkspSize);
+
 #endif /* ZSTD_PRESPLIT_H */

@@ -285,8 +285,8 @@ struct ZSTD_MatchState_t {
     BYTE* tagTable;                          /* For row-based matchFinder: A row-based table containing the hashes and head index. */
     U32 hashCache[ZSTD_ROW_HASH_CACHE_SIZE]; /* For row-based matchFinder: a cache of hashes to improve speed */
     U64 hashSalt;                            /* For row-based matchFinder: salts the hash for reuse of tag table */
-    U32 dfastMode;
     U32 hashSaltEntropy;                     /* For row-based matchFinder: collects entropy for salt generation */
+    U32 dfastMode;                           /* Double-fast: layout (bits 0-1), long matches (bit 2). */
 
     U32* hashTable;
     U32* hashTable3;
