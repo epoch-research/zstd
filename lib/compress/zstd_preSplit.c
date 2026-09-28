@@ -310,13 +310,58 @@ ZSTD_splitBlock_fastChunks(const void* blockStart, size_t blockSize,
     return blockSize;
 }
 
+/* This gate only decides whether to run the finer test, not where to
+ * split. Its threshold is deliberately less strict than the chunk test.
+ * Use small counters and omit the middle fingerprint needed by the
+ * standalone border splitter: that fingerprint cannot affect this gate. */
+static int ZSTD_bordersDiffer(const void* blockStart, size_t blockSize,
+                             void* workspace, size_t wkspSize)
+{
+    U16* const a = (U16*)workspace;
+    U16* const b = a + 256;
+    const BYTE* const p = (const BYTE*)blockStart;
+    const BYTE* const q = p + blockSize - 512;
+    U32 distance = 0;
+    size_t n, i;
+    assert(blockSize == 128 KB);
+    assert(wkspSize >= 2*256*sizeof(U16));
+    (void)wkspSize;
+    ZSTD_memset(workspace, 0, 2*256*sizeof(U16));
+    for (n = 0; n < 512; ++n) {
+        a[p[n]]++;
+        b[q[n]]++;
+    }
+#if defined(__SSE2__)
+    {
+        __m128i acc = _mm_setzero_si128(), sum;
+        for (i = 0; i < 256; i += 8) {
+            __m128i const aa = _mm_loadu_si128((const __m128i*)(a+i));
+            __m128i const bb = _mm_loadu_si128((const __m128i*)(b+i));
+            __m128i const diff = _mm_sub_epi16(aa, bb);
+            __m128i const sign = _mm_srai_epi16(diff, 15);
+            acc = _mm_add_epi16(acc, _mm_sub_epi16(_mm_xor_si128(diff, sign), sign));
+        }
+        /* The total distance is at most 1024, so signed 16-bit sums suffice. */
+        sum = _mm_madd_epi16(acc, _mm_set1_epi16(1));
+        sum = _mm_add_epi32(sum, _mm_srli_si128(sum, 8));
+        sum = _mm_add_epi32(sum, _mm_srli_si128(sum, 4));
+        distance = (U32)_mm_cvtsi128_si32(sum);
+    }
+#else
+    for (i = 0; i < 256; ++i) {
+        int const d = (int)a[i] - (int)b[i];
+        distance += (U32)(d < 0 ? -d : d);
+    }
+#endif
+    return distance >= 512*12/16;
+}
+
 /* Refine the cheap estimate only when the borders indicate a change. */
 size_t ZSTD_splitBlock_fast(const void* blockStart, size_t blockSize,
                            void* workspace, size_t wkspSize)
 {
-    size_t const coarse = ZSTD_splitBlock_fromBorders(blockStart, blockSize,
-                                                     workspace, wkspSize);
-    if (coarse == blockSize) return blockSize;
+    if (!ZSTD_bordersDiffer(blockStart, blockSize, workspace, wkspSize))
+        return blockSize;
     return ZSTD_splitBlock_fastChunks(blockStart, blockSize, workspace, wkspSize);
 }
 
