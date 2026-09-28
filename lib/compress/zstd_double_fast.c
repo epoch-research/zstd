@@ -715,6 +715,7 @@ _match_stored:
                 ZSTD_dfastSaveLong(hashLong, ZSTD_hashPtr(ip-2, hBitsL+(tagged ? ZSTD_DFAST_TAG_BITS : 0), 8), (U32)(ip-longBase)-2, tagged);
             }
 
+_check_immediate_repeat:
             /* check immediate repcode */
             while ( (ip <= ilimit)
                  && ( (offset_2>0)
@@ -764,6 +765,11 @@ _match_stored:
                 }
                 ip += rLength;
                 anchor = ip;
+                /* Keep following zero-literal repeats before restarting hash
+                 * searches. Every pass consumes at least four bytes and
+                 * rechecks ilimit; shifted repeats consume at least eight.
+                 * The original longer-match gate applies to this whole run. */
+                goto _check_immediate_repeat;
             }
         }
     }
