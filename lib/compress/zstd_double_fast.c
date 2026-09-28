@@ -336,6 +336,33 @@ size_t ZSTD_compressBlock_doubleFast_noDict_generic(
                         goto _match_found;
                     }
                 }
+                /* A short first-repeat match can hide a longer ordinary
+                 * match at the same position. The earlier probe tested ip,
+                 * not the repeat's start ip+1. Bound this extra lookup to
+                 * short repeats and require enough extra matched bytes to
+                 * pay for a normal offset. ip+1 <= ip1 <= ilimit here. */
+                if (tagged && mLength <= 8) {
+                    const BYTE* const rp = ip+1;
+                    size_t const rh = ZSTD_hashPtr(rp, hBitsL+ZSTD_DFAST_TAG_BITS, 8);
+                    U32 const ri = ZSTD_dfastLoadLong(hashLong, rh, tagged);
+                    if (ZSTD_dfastValidLong(ri, (U32)(rp-longBase), longLowestIndex, 1, tagged)) {
+                        const BYTE* rm = longBase+ri;
+                        if (MEM_read64(rp) == MEM_read64(rm)) {
+                            size_t const rlen = ZSTD_dfastCount(rp+8, rm+8, iend, longMode)+8;
+                            U32 const roff = (U32)(rp-rm);
+                            if (((int)rlen-(int)mLength)*(swapTables ? 4 : 3) > (int)ZSTD_highbit32(roff+3)) {
+                                mLength = rlen;
+                                offset = roff;
+                                ip = rp;
+                                /* ip1 need not equal rp when skipping. Keep
+                                 * the usual complementary insertion key. */
+                                hl1 = ZSTD_hashPtr(ip1, hBitsL+ZSTD_DFAST_TAG_BITS, 8);
+                                while (((ip>anchor) & (rm>prefixLowest)) && (ip[-1] == rm[-1])) { ip--; rm--; mLength++; }
+                                goto _match_found;
+                            }
+                        }
+                    }
+                }
                 ip++;
                 ZSTD_storeSeq(seqStore, (size_t)(ip-anchor), anchor, iend, REPCODE1_TO_OFFBASE, mLength);
                 goto _match_stored;
