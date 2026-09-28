@@ -472,11 +472,10 @@ size_t FSE_normalizeCount (short* normalizedCounter, unsigned tableLog,
     if (tableLog > FSE_MAX_TABLELOG) return ERROR(tableLog_tooLarge);   /* Unsupported size */
     if (tableLog < FSE_minTableLog(total, maxSymbolValue)) return ERROR(GENERIC);   /* Too small tableLog, compression potentially impossible */
 
-    {   static U32 const rtbTable[] = {     0, 473195, 504333, 520860, 550000, 700000, 750000, 830000 };
+    {
         short const lowProbCount = useLowProbCount ? -1 : 1;
         U64 const scale = 62 - tableLog;
         U64 const step = ZSTD_div64((U64)1<<62, (U32)total);   /* <== here, one division ! */
-        U64 const vStep = 1ULL<<(scale-20);
         int stillToDistribute = 1<<tableLog;
         unsigned s;
         unsigned largest=0;
@@ -490,11 +489,10 @@ size_t FSE_normalizeCount (short* normalizedCounter, unsigned tableLog,
                 normalizedCounter[s] = lowProbCount;
                 stillToDistribute--;
             } else {
-                short proba = (short)((count[s]*step) >> scale);
-                if (proba<8) {
-                    U64 restToBeat = vStep * rtbTable[proba];
-                    proba += (count[s]*step) - ((U64)proba<<scale) > restToBeat;
-                }
+                /* Round to nearest before correcting the largest probability.
+                 * Truncating larger probabilities biases that correction toward
+                 * the most frequent symbol. This needs no additional pass. */
+                short proba = (short)((count[s]*step + (1ULL << (scale-1))) >> scale);
                 if (proba > largestP) { largestP=proba; largest=s; }
                 normalizedCounter[s] = proba;
                 stillToDistribute -= proba;
