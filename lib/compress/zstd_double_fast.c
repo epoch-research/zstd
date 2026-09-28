@@ -771,6 +771,33 @@ _check_immediate_repeat:
                  * The original longer-match gate applies to this whole run. */
                 goto _check_immediate_repeat;
             }
+            /* In prose, try a locally known third repeat when the second
+             * repeat missed at this boundary. The original longer-match
+             * gate applies to the repeat run. Bound the offset before its
+             * candidate read, then require all eight bytes to match. */
+            if (tagged && (!swapTables && mls==6) && mLength >= 16 && ip <= ilimit) {
+                U32 const rOffset = offset_3;
+                if (UNLIKELY(rOffset > 0 && rOffset <= (U32)(ip-prefixLowest) &&
+                    MEM_read64(ip-rOffset) == MEM_read64(ip))) {
+                    size_t const rLength = ZSTD_dfastCount(ip+8, ip+8-rOffset, iend, longMode)+8;
+                    /* With zero literals, code two selects the third offset. */
+                    offset_3 = offset_2;
+                    offset_2 = offset_1;
+                    offset_1 = rOffset;
+                    ZSTD_dfastSaveShort(hashSmall, ZSTD_hashPtr(ip, hBitsS+ZSTD_DFAST_SHORT_TAG_BITS, mls), (U32)(ip-longBase), tagged);
+                    ZSTD_dfastSaveLong(hashLong, ZSTD_hashPtr(ip, hBitsL+ZSTD_DFAST_TAG_BITS, 8), (U32)(ip-longBase), tagged);
+                    ZSTD_storeSeqOnly(seqStore, 0, REPCODE2_TO_OFFBASE, rLength);
+                    if (rLength >= 32 && ip+rLength <= ilimit) {
+                        ZSTD_dfastSaveLong(hashLong, ZSTD_hashPtr(ip+2, hBitsL+ZSTD_DFAST_TAG_BITS, 8), (U32)(ip+2-longBase), tagged);
+                        ZSTD_dfastSaveShort(hashSmall, ZSTD_hashPtr(ip+2, hBitsS+ZSTD_DFAST_SHORT_TAG_BITS, mls), (U32)(ip+2-longBase), tagged);
+                        ZSTD_dfastSaveLong(hashLong, ZSTD_hashPtr(ip+rLength-2, hBitsL+ZSTD_DFAST_TAG_BITS, 8), (U32)(ip+rLength-2-longBase), tagged);
+                        ZSTD_dfastSaveShort(hashSmall, ZSTD_hashPtr(ip+rLength-1, hBitsS+ZSTD_DFAST_SHORT_TAG_BITS, mls), (U32)(ip+rLength-1-longBase), tagged);
+                    }
+                    ip += rLength;
+                    anchor = ip;
+                    goto _check_immediate_repeat;
+                }
+            }
         }
     }
 }
