@@ -392,7 +392,7 @@ _match_stored:
                 U32 const tmpOff = offset_2; offset_2 = offset_1; offset_1 = tmpOff;  /* swap offset_2 <=> offset_1 */
                 hashSmall[ZSTD_hashPtr(ip, hBitsS, mls)] = (U32)(ip-base);
                 hashLong[ZSTD_hashPtr(ip, hBitsL, 8)] = (U32)(ip-base);
-                ZSTD_storeSeq(seqStore, 0, anchor, iend, REPCODE1_TO_OFFBASE, rLength);
+                ZSTD_storeSeqOnly(seqStore, 0, REPCODE1_TO_OFFBASE, rLength);
                 ip += rLength;
                 anchor = ip;
                 continue;   /* faster when present ... (?) */

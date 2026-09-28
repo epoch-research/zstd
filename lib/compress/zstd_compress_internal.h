@@ -677,7 +677,9 @@ ZSTD_rleCompressBlock(void* dst, size_t dstCapacity, BYTE src, size_t srcSize, U
  * note : use same formula for both situations */
 MEM_STATIC size_t ZSTD_minGain(size_t srcSize, ZSTD_strategy strat)
 {
-    U32 const minlog = (strat>=ZSTD_btultra) ? (U32)(strat) - 1 : 6;
+    /* Double-fast has already paid for entropy coding here. Retain modest
+     * gains rather than replacing the result with an uncompressed block. */
+    U32 const minlog = strat == ZSTD_dfast ? 10 : (strat>=ZSTD_btultra) ? (U32)(strat) - 1 : 6;
     ZSTD_STATIC_ASSERT(ZSTD_btultra == 8);
     assert(ZSTD_cParam_withinBounds(ZSTD_c_strategy, (int)strat));
     return (srcSize >> minlog) + 2;
