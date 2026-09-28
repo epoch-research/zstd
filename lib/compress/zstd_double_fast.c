@@ -255,9 +255,9 @@ size_t ZSTD_compressBlock_doubleFast_noDict_generic(
                         matchl1 = base + idxl1;
                         if (idxl1 > prefixLowestIndex && MEM_read64(matchl1) == MEM_read64(ip1)) {
                             size_t const len = ZSTD_dfastCount(ip1+8, matchl1+8, iend, longMode) + 8;
-                            if (((int)len-(int)mLength)*(swapTables ? 6 : 4) >
+                            if (((int)len-(int)mLength)*(swapTables ? 6 : 3) >
                                 (int)ZSTD_highbit32((U32)(ip1-matchl1)+3) - (int)ZSTD_highbit32(offset+3)
-                                + ((int)(ip1-ip)-2*(int)(ip1[-1] == matchl1[-1]))*(swapTables ? 6 : 4)) {
+                                + ((int)(ip1-ip)-2*(int)(ip1[-1] == matchl1[-1]))*(swapTables ? 6 : 3)) {
                                 ip = ip1;
                                 mLength = len;
                                 matchl0 = matchl1;
@@ -318,8 +318,8 @@ _search_next_long:
         /* check long match at +1 position */
         if ((idxl1 > prefixLowestIndex) && (MEM_read64(matchl1) == MEM_read64(ip1))) {
             size_t const l1len = ZSTD_dfastCount(ip1+8, matchl1+8, iend, longMode) + 8;
-            if (tuned ? (((int)l1len-(int)mLength)*(swapTables ? 6 : 4) >
-                    (int)ZSTD_highbit32((U32)(ip1-matchl1)+3) - (int)ZSTD_highbit32(offset+3) + ((int)(ip1-ip)-2*(int)(ip1[-1] == matchl1[-1]))*(swapTables ? 6 : 4)) : l1len > mLength) {
+            if (tuned ? (((int)l1len-(int)mLength)*(swapTables ? 6 : 3) >
+                    (int)ZSTD_highbit32((U32)(ip1-matchl1)+3) - (int)ZSTD_highbit32(offset+3) + ((int)(ip1-ip)-2*(int)(ip1[-1] == matchl1[-1]))*(swapTables ? 6 : 3)) : l1len > mLength) {
                 /* use the long match instead */
                 ip = ip1;
                 mLength = l1len;
