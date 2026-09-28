@@ -245,7 +245,8 @@ size_t ZSTD_compressBlock_doubleFast_noDict_generic(
      * means unknown; do not rely on rep[2], which double-fast doesn't keep.
      * Keep this uncommon state on the stack to limit hot-loop registers. */
     volatile U32 offset_3 = 0;
-    U32 curr;
+    U32 curr = 0;
+    const BYTE* searchStart = NULL;
     U32 currLong;
 
     /* how many positions to search before increasing step size */
@@ -307,7 +308,12 @@ size_t ZSTD_compressBlock_doubleFast_noDict_generic(
         do {
             const size_t hs0 = ZSTD_hashPtr(ip, hBitsS+(tagged ? ZSTD_DFAST_SHORT_TAG_BITS : 0), mls);
             const U32 idxs0 = ZSTD_dfastLoadShort(hashSmall, hs0, tagged);
-            curr = (U32)(ip-base);
+            /* Tagged chunks cannot overflow the base-relative index.
+             * Keep this address for complementary inserts instead of
+             * reconstructing it from a truncated index after a match.
+             * Untagged callers retain the original index arithmetic. */
+            if (tagged) searchStart = ip;
+            else curr = (U32)(ip-base);
             currLong = (U32)(ip-longBase);
             matchs0 = longBase + idxs0;
 
@@ -509,6 +515,33 @@ _search_next_long:
             }
         }
 
+        /* The six-byte prose key has sparser short matches than the
+         * five-byte identifier key. If neither earlier lazy probe improved
+         * this short match, try one more long candidate. ip3 is at least
+         * three bytes after anchor, and each candidate look-behind byte is
+         * independently prefix-bounded. Only credit those three bytes;
+         * the usual backward extension still follows a winning candidate. */
+        if (tagged && !swapTables && mls == 6 && mLength <= 16 && step == 1 && ip < ip1 && ip1+2 <= ilimit) {
+            const BYTE* const ip3 = ip1+2;
+            size_t const h3 = ZSTD_hashPtr(ip3, hBitsL+ZSTD_DFAST_TAG_BITS, 8);
+            U32 const idx3 = ZSTD_dfastLoadLong(hashLong, h3, tagged);
+            if (ZSTD_dfastValidLong(idx3, (U32)(ip3-longBase), longLowestIndex, 1, tagged)) {
+                const BYTE* const match3 = longBase+idx3;
+                if (MEM_read64(ip3) == MEM_read64(match3)) {
+                    size_t const len3 = ZSTD_dfastCount(ip3+8, match3+8, iend, longMode)+8;
+                    U32 const off3 = (U32)(ip3-match3);
+                    int const back = ip3[-1] == match3[-1] ?
+                        (idx3 > longLowestIndex+1 && ip3[-2] == match3[-2] ?
+                         (idx3 > longLowestIndex+2 && ip3[-3] == match3[-3] ? 3 : 2) : 1) : 0;
+                    if (((int)len3-(int)mLength)*(swapTables ? 4 : 3) >
+                        (int)ZSTD_highbit32(off3+3)-(int)ZSTD_highbit32(offset+3) +
+                        ((int)(ip3-ip)-2*back)*(swapTables ? 4 : 3)) {
+                        ip=ip3; mLength=len3; offset=off3; matchs0=match3;
+                    }
+                }
+            }
+        }
+
         /* For short binary candidates, compare the second repeat before
          * backward extension. Charge a normal offset's bits against the
          * repeat's length advantage. A winning repeat reaches the existing
@@ -590,9 +623,11 @@ _match_stored:
         if (ip <= ilimit) {
             /* Complementary insertion */
             /* done after iLimit test, as candidates could be > iend-8 */
-            {   U32 const indexToInsert = curr+2;
-                ZSTD_dfastSaveLong(hashLong, ZSTD_hashPtr(base+indexToInsert, hBitsL+(tagged ? ZSTD_DFAST_TAG_BITS : 0), 8), currLong+2, tagged);
-                ZSTD_dfastSaveShort(hashSmall, ZSTD_hashPtr(base+indexToInsert, hBitsS+(tagged ? ZSTD_DFAST_SHORT_TAG_BITS : 0), mls), currLong+2, tagged);
+            {   const BYTE* const fillBase = (tagged) ? searchStart : base+curr;
+                const BYTE* const front2 = (tagged) ? searchStart+2 : base+(U32)(curr+2);
+                assert(!tagged || searchStart == longBase + currLong);
+                ZSTD_dfastSaveLong(hashLong, ZSTD_hashPtr(front2, hBitsL+(tagged ? ZSTD_DFAST_TAG_BITS : 0), 8), currLong+2, tagged);
+                ZSTD_dfastSaveShort(hashSmall, ZSTD_hashPtr(front2, hBitsS+(tagged ? ZSTD_DFAST_SHORT_TAG_BITS : 0), mls), currLong+2, tagged);
                 ZSTD_dfastSaveShort(hashSmall, ZSTD_hashPtr(ip-1, hBitsS+(tagged ? ZSTD_DFAST_SHORT_TAG_BITS : 0), mls), (U32)(ip-1-longBase), tagged);
                 /* Spread existing insertions across longer text and tagged
                  * binary matches. Short matches retain dense front coverage;
@@ -602,10 +637,10 @@ _match_stored:
                 if (tuned) {
                     /* Without fingerprints, keep dense front coverage a
                      * little longer for the five-byte text-key fallback. */
-                    if ((!swapTables || tagged) && (size_t)(ip-(base+curr)) >= ((!tagged && mls == 5) ? 16 : 12)) {
-                        ZSTD_dfastSaveLong(hashLong, ZSTD_hashPtr(base+curr+4, hBitsL+(tagged ? ZSTD_DFAST_TAG_BITS : 0), 8), currLong+4, tagged);
-                        {   size_t const hl = ZSTD_hashPtr(base+curr+8, hBitsL+(tagged ? ZSTD_DFAST_TAG_BITS : 0), 8);
-                            size_t const hs = ZSTD_hashPtr(base+curr+8, hBitsS+(tagged ? ZSTD_DFAST_SHORT_TAG_BITS : 0), mls);
+                    if ((!swapTables || tagged) && (size_t)(ip-(fillBase)) >= ((!tagged && mls == 5) ? 16 : 12)) {
+                        ZSTD_dfastSaveLong(hashLong, ZSTD_hashPtr(fillBase+4, hBitsL+(tagged ? ZSTD_DFAST_TAG_BITS : 0), 8), currLong+4, tagged);
+                        {   size_t const hl = ZSTD_hashPtr(fillBase+8, hBitsL+(tagged ? ZSTD_DFAST_TAG_BITS : 0), 8);
+                            size_t const hs = ZSTD_hashPtr(fillBase+8, hBitsS+(tagged ? ZSTD_DFAST_SHORT_TAG_BITS : 0), mls);
                             ZSTD_dfastSaveLong(hashLong, hl, currLong+8, tagged);
                             ZSTD_dfastSaveShort(hashSmall, hs, currLong+8, tagged);
                         }
@@ -620,28 +655,28 @@ _match_stored:
                             ZSTD_dfastSaveShort(hashSmall, hs4, matchEndIndex-4-longBaseIndex, tagged);
                         }
                     } else {
-                        ZSTD_dfastSaveLong(hashLong, ZSTD_hashPtr(base+curr+3, hBitsL+(tagged ? ZSTD_DFAST_TAG_BITS : 0), 8), currLong+3, tagged);
-                        if (base+curr+4 < ip) {
-                            size_t const hl = ZSTD_hashPtr(base+curr+4, hBitsL+(tagged ? ZSTD_DFAST_TAG_BITS : 0), 8);
-                            size_t const hs = ZSTD_hashPtr(base+curr+4, hBitsS+(tagged ? ZSTD_DFAST_SHORT_TAG_BITS : 0), mls);
+                        ZSTD_dfastSaveLong(hashLong, ZSTD_hashPtr(fillBase+3, hBitsL+(tagged ? ZSTD_DFAST_TAG_BITS : 0), 8), currLong+3, tagged);
+                        if (fillBase+4 < ip) {
+                            size_t const hl = ZSTD_hashPtr(fillBase+4, hBitsL+(tagged ? ZSTD_DFAST_TAG_BITS : 0), 8);
+                            size_t const hs = ZSTD_hashPtr(fillBase+4, hBitsS+(tagged ? ZSTD_DFAST_SHORT_TAG_BITS : 0), mls);
                             ZSTD_dfastSaveLong(hashLong, hl, currLong+4, tagged);
                             ZSTD_dfastSaveShort(hashSmall, hs, currLong+4, tagged);
                         }
-                        if (!swapTables && base+curr+6 < ip) {
+                        if (!swapTables && fillBase+6 < ip) {
                             /* One bound covers both extra positions. */
-                            ZSTD_dfastSaveLong(hashLong, ZSTD_hashPtr(base+curr+5, hBitsL+(tagged ? ZSTD_DFAST_TAG_BITS : 0), 8), currLong+5, tagged);
-                            {   size_t const hl = ZSTD_hashPtr(base+curr+6, hBitsL+(tagged ? ZSTD_DFAST_TAG_BITS : 0), 8);
-                                size_t const hs = ZSTD_hashPtr(base+curr+6, hBitsS+(tagged ? ZSTD_DFAST_SHORT_TAG_BITS : 0), mls);
+                            ZSTD_dfastSaveLong(hashLong, ZSTD_hashPtr(fillBase+5, hBitsL+(tagged ? ZSTD_DFAST_TAG_BITS : 0), 8), currLong+5, tagged);
+                            {   size_t const hl = ZSTD_hashPtr(fillBase+6, hBitsL+(tagged ? ZSTD_DFAST_TAG_BITS : 0), 8);
+                                size_t const hs = ZSTD_hashPtr(fillBase+6, hBitsS+(tagged ? ZSTD_DFAST_SHORT_TAG_BITS : 0), mls);
                                 ZSTD_dfastSaveLong(hashLong, hl, currLong+6, tagged);
                                 ZSTD_dfastSaveShort(hashSmall, hs, currLong+6, tagged);
                             }
                         } else {
-                            if ((!swapTables || (size_t)(ip-(base+curr))>8) && base+curr+5 < ip) {
-                                ZSTD_dfastSaveLong(hashLong, ZSTD_hashPtr(base+curr+5, hBitsL+(tagged ? ZSTD_DFAST_TAG_BITS : 0), 8), currLong+5, tagged);
+                            if ((!swapTables || (size_t)(ip-(fillBase))>8) && fillBase+5 < ip) {
+                                ZSTD_dfastSaveLong(hashLong, ZSTD_hashPtr(fillBase+5, hBitsL+(tagged ? ZSTD_DFAST_TAG_BITS : 0), 8), currLong+5, tagged);
                             }
-                            if ((!swapTables || (size_t)(ip-(base+curr))>8) && base+curr+6 < ip) {
-                                size_t const hl = ZSTD_hashPtr(base+curr+6, hBitsL+(tagged ? ZSTD_DFAST_TAG_BITS : 0), 8);
-                                size_t const hs = ZSTD_hashPtr(base+curr+6, hBitsS+(tagged ? ZSTD_DFAST_SHORT_TAG_BITS : 0), mls);
+                            if ((!swapTables || (size_t)(ip-(fillBase))>8) && fillBase+6 < ip) {
+                                size_t const hl = ZSTD_hashPtr(fillBase+6, hBitsL+(tagged ? ZSTD_DFAST_TAG_BITS : 0), 8);
+                                size_t const hs = ZSTD_hashPtr(fillBase+6, hBitsS+(tagged ? ZSTD_DFAST_SHORT_TAG_BITS : 0), mls);
                                 ZSTD_dfastSaveLong(hashLong, hl, currLong+6, tagged);
                                 ZSTD_dfastSaveShort(hashSmall, hs, currLong+6, tagged);
                             }
