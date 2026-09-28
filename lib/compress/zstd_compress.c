@@ -4947,6 +4947,7 @@ static size_t ZSTD_compress_frameChunk(ZSTD_CCtx* cctx,
     result = ZSTD_compress_frameChunk_body(cctx, dst, dstCapacity, src, srcSize, lastFrameChunk);
     if (ms->dfastMode & ZSTD_DFAST_TAG_ACTIVE) {
         ZSTD_memset(ms->hashTable, 0, ((size_t)1 << ms->cParams.hashLog)*sizeof(U32));
+        ZSTD_memset(ms->chainTable, 0, ((size_t)1 << ms->cParams.chainLog)*sizeof(U32));
     }
     ms->dfastMode &= ~(U32)ZSTD_DFAST_TAG_MASK;
     ms->dfastTagOrigin = 0;

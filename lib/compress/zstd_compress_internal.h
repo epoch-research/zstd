@@ -305,7 +305,7 @@ struct ZSTD_MatchState_t {
     optState_t opt;         /* optimal parser state */
     const ZSTD_MatchState_t* dictMatchState;
     ZSTD_compressionParameters cParams;
-    U32 dfastTagOrigin; /* Frame-chunk-relative long-table origin, valid only
+    U32 dfastTagOrigin; /* Frame-chunk-relative tagged-table origin, valid only
                          * with ZSTD_DFAST_TAG_ACTIVE. Uses 64-bit padding. */
     const RawSeqStore_t* ldmSeqStore;
 
