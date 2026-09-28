@@ -15,7 +15,7 @@
 #include "hist.h" /* HIST_add */
 #include "zstd_preSplit.h"
 
-#if defined(__SSE2__)
+#if defined(__SSE2__) && !defined(ZSTD_NO_INTRINSICS)
 #include <emmintrin.h>
 #endif
 
@@ -274,7 +274,7 @@ ZSTD_splitBlock_fastChunks(const void* blockStart, size_t blockSize,
             hist[3*256 + src[(n+3)*43]]++;
         }
         for (; n<(CHUNKSIZE+41)/43; ++n) hist[src[n*43]]++;
-#if defined(__SSE2__)
+#if defined(__SSE2__) && !defined(ZSTD_NO_INTRINSICS)
         {
         __m128i acc = _mm_setzero_si128();
         __m128i const mul = _mm_set1_epi16((short)k);
@@ -331,7 +331,7 @@ static int ZSTD_bordersDiffer(const void* blockStart, size_t blockSize,
         a[p[n]]++;
         b[q[n]]++;
     }
-#if defined(__SSE2__)
+#if defined(__SSE2__) && !defined(ZSTD_NO_INTRINSICS)
     {
         __m128i acc = _mm_setzero_si128(), sum;
         for (i = 0; i < 256; i += 8) {

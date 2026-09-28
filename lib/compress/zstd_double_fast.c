@@ -13,7 +13,7 @@
 
 #ifndef ZSTD_EXCLUDE_DFAST_BLOCK_COMPRESSOR
 
-#if defined(__SSE2__)
+#if defined(__SSE2__) && !defined(ZSTD_NO_INTRINSICS)
 #include <emmintrin.h>
 #endif
 /* Keep the word-sized fast exit for short matches. For long-match blocks,
@@ -27,7 +27,7 @@ FORCE_INLINE_TEMPLATE size_t ZSTD_dfastCount(const BYTE* pIn, const BYTE* pMatch
         if (diff) return ZSTD_NbCommonBytes(diff);
         pIn+=sizeof(size_t); pMatch+=sizeof(size_t);
     }
-#if defined(__SSE2__)
+#if defined(__SSE2__) && !defined(ZSTD_NO_INTRINSICS)
     while ((size_t)(pInLimit-pIn) >= 16) {
         __m128i const a = _mm_loadu_si128((const __m128i*)pIn);
         __m128i const b = _mm_loadu_si128((const __m128i*)pMatch);
@@ -363,22 +363,27 @@ _match_stored:
                 hashSmall[ZSTD_hashPtr(base+indexToInsert, hBitsS, mls)] = indexToInsert;
                 hashSmall[ZSTD_hashPtr(ip-1, hBitsS, mls)] = (U32)(ip-1-base);
                 /* Fill a few more positions at the beginning of the match.
-                 * Text benefits from denser insertion; the larger short table
-                 * already covers binary inputs well with fewer positions.
+                 * Text benefits from denser insertion. For binary inputs,
+                 * reserve the extra positions for matches longer than eight
+                 * bytes; short matches already have enough hash coverage.
                  * Never insert at or beyond the next search position.
                  * The enclosing ilimit check makes these hash reads safe. */
                 if (tuned) {
                     hashLong[ZSTD_hashPtr(base+curr+3, hBitsL, 8)] = curr+3;
                     if (base+curr+4 < ip) {
-                        hashLong[ZSTD_hashPtr(base+curr+4, hBitsL, 8)] = curr+4;
-                        hashSmall[ZSTD_hashPtr(base+curr+4, hBitsS, mls)] = curr+4;
+                        size_t const hl = ZSTD_hashPtr(base+curr+4, hBitsL, 8);
+                        size_t const hs = ZSTD_hashPtr(base+curr+4, hBitsS, mls);
+                        hashLong[hl] = curr+4;
+                        hashSmall[hs] = curr+4;
                     }
-                    if (!swapTables && base+curr+5 < ip) {
+                    if ((!swapTables || (size_t)(ip-(base+curr))>8) && base+curr+5 < ip) {
                         hashLong[ZSTD_hashPtr(base+curr+5, hBitsL, 8)] = curr+5;
                     }
-                    if (!swapTables && base+curr+6 < ip) {
-                        hashLong[ZSTD_hashPtr(base+curr+6, hBitsL, 8)] = curr+6;
-                        hashSmall[ZSTD_hashPtr(base+curr+6, hBitsS, mls)] = curr+6;
+                    if ((!swapTables || (size_t)(ip-(base+curr))>8) && base+curr+6 < ip) {
+                        size_t const hl = ZSTD_hashPtr(base+curr+6, hBitsL, 8);
+                        size_t const hs = ZSTD_hashPtr(base+curr+6, hBitsS, mls);
+                        hashLong[hl] = curr+6;
+                        hashSmall[hs] = curr+6;
                     }
                 }
             }
