@@ -307,15 +307,28 @@ size_t ZSTD_compressBlock_doubleFast_noDict_generic(
         do {
             const size_t hs0 = ZSTD_hashPtr(ip, hBitsS+(tagged ? ZSTD_DFAST_SHORT_TAG_BITS : 0), mls);
             const U32 idxs0 = ZSTD_dfastLoadShort(hashSmall, hs0, tagged);
+            U64 repDiff;
             curr = (U32)(ip-base);
             currLong = (U32)(ip-longBase);
             matchs0 = longBase + idxs0;
 
             ZSTD_dfastSaveShort(hashSmall, hs0, currLong, tagged); ZSTD_dfastSaveLong(hashLong, hl0, currLong, tagged);   /* update hash tables */
 
-            /* check noDict repcode */
-            if ((offset_1 > 0) & (MEM_read32(ip+1-offset_1) == ((tuned && MEM_64bits()) ? (MEM_isLittleEndian() ? (U32)(currentWord>>8) : (U32)(currentWord>>24)) : MEM_read32(ip+1)))) {
-                mLength = ZSTD_dfastCount(ip+1+4, ip+1+4-offset_1, iend, longMode) + 4;
+            /* In tagged binary long-match blocks, accept a three-byte
+             * repeat at ip+1. It always follows at least one literal, so each
+             * sequence still consumes at least four input bytes: the existing
+             * sequence workspace bound is unchanged. Immediate repeats below
+             * retain their four-byte minimum.
+             *
+             * The cached input word contains seven bytes starting at ip+1.
+             * Compare those in little-endian order, ignoring the eighth byte
+             * of the candidate load. ip+1 <= ip1 <= ilimit bounds that load,
+             * and the validated repeat offset bounds its lower address. */
+            repDiff = (tagged && swapTables && longMode) ?
+                (MEM_readLE64(ip+1-offset_1) ^ ((MEM_isLittleEndian() ? currentWord : MEM_swap64(currentWord)) >> 8)) & 0x00FFFFFFFFFFFFFFULL :
+                MEM_read32(ip+1-offset_1) ^ ((tuned && MEM_64bits()) ? (MEM_isLittleEndian() ? (U32)(currentWord>>8) : (U32)(currentWord>>24)) : MEM_read32(ip+1));
+            if ((offset_1 > 0) & ((repDiff & ((tagged && swapTables && longMode) ? 0x00FFFFFFULL : 0xFFFFFFFFULL)) == 0)) {
+                mLength = (tagged && swapTables && longMode) ? (repDiff ? (ZSTD_countTrailingZeros64(repDiff) >> 3) : ZSTD_dfastCount(ip+8, ip+8-offset_1, iend, longMode) + 7) : ZSTD_dfastCount(ip+5, ip+5-offset_1, iend, longMode) + 4;
                 /* A cheap repeat is not necessarily the best match when a
                  * substantially longer regular match starts one byte earlier. */
                 if (tuned && mLength <= 32 && ZSTD_dfastValidLong(idxl0, currLong, longLowestIndex, 1, tagged) && MEM_read64(matchl0) == MEM_read64(ip)) {
@@ -331,6 +344,7 @@ size_t ZSTD_compressBlock_doubleFast_noDict_generic(
                     }
                 }
                 ip++;
+                assert(mLength >= 4 || (tagged && swapTables && longMode && ip > anchor));
                 ZSTD_storeSeq(seqStore, (size_t)(ip-anchor), anchor, iend, REPCODE1_TO_OFFBASE, mLength);
                 goto _match_stored;
             }
@@ -1091,8 +1105,10 @@ size_t ZSTD_compressBlock_doubleFast(
                 size_t const matched = srcSize - result - (size_t)(seqStore->lit - litBegin);
                 /* Long-match blocks leave more stale hash entries. Use the
                  * branchless validity checks and wide counter in that case.
-                 * This selection affects speed only, not the parse. */
-                ms->dfastMode = (ms->dfastMode & ZSTD_DFAST_TAG_MASK) | mode | ((n && matched >= n*24) ? 4 : 0);
+                 * Tagged binary also enables three-byte repeats in this mode;
+                 * select it earlier there, while keeping the table layout
+                 * stable and the other layouts' threshold unchanged. */
+                ms->dfastMode = (ms->dfastMode & ZSTD_DFAST_TAG_MASK) | mode | ((n && matched >= n*((mode == 3 && (ms->dfastMode & ZSTD_DFAST_TAG_ACTIVE)) ? 14 : 24)) ? 4 : 0);
             }
             return result;
         }

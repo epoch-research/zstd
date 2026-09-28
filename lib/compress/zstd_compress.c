@@ -3241,7 +3241,8 @@ static size_t ZSTD_fastSequenceLengthSum(ZSTD_Sequence const* seqBuf, size_t seq
 /**
  * Function to validate sequences produced by a block compressor.
  */
-static void ZSTD_validateSeqStore(const SeqStore_t* seqStore, const ZSTD_compressionParameters* cParams)
+static void ZSTD_validateSeqStore(const SeqStore_t* seqStore, const ZSTD_compressionParameters* cParams,
+                                  int allow3ByteRepeats)
 {
 #if DEBUGLEVEL >= 1
     const SeqDef* seq = seqStore->sequencesStart;
@@ -3249,13 +3250,19 @@ static void ZSTD_validateSeqStore(const SeqStore_t* seqStore, const ZSTD_compres
     size_t const matchLenLowerBound = cParams->minMatch == 3 ? 3 : 4;
     for (; seq < seqEnd; ++seq) {
         const ZSTD_SequenceLength seqLength = ZSTD_getSequenceLength(seqStore, seq);
-        assert(seqLength.matchLength >= matchLenLowerBound);
+        /* Tagged binary primary repeats may have length three, but must
+         * retain a literal and a first-repeat code. They still consume at
+         * least four input bytes per sequence, preserving the allocation bound. */
+        assert(seqLength.matchLength >= matchLenLowerBound ||
+               (allow3ByteRepeats && seqLength.matchLength == 3 &&
+                seqLength.litLength >= 1 && seq->offBase == REPCODE1_TO_OFFBASE));
         (void)seqLength;
         (void)matchLenLowerBound;
     }
 #else
     (void)seqStore;
     (void)cParams;
+    (void)allow3ByteRepeats;
 #endif
 }
 
@@ -3429,7 +3436,8 @@ static size_t ZSTD_buildSeqStore(ZSTD_CCtx* zc, const void* src, size_t srcSize)
         {   const BYTE* const lastLiterals = (const BYTE*)src + srcSize - lastLLSize;
             ZSTD_storeLastLiterals(&zc->seqStore, lastLiterals, lastLLSize);
     }   }
-    ZSTD_validateSeqStore(&zc->seqStore, &zc->appliedParams.cParams);
+    ZSTD_validateSeqStore(&zc->seqStore, &zc->appliedParams.cParams,
+                         (ms->dfastMode & (ZSTD_DFAST_TAG_ACTIVE | 3)) == (ZSTD_DFAST_TAG_ACTIVE | 3));
     return ZSTDbss_compress;
 }
 
