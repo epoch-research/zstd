@@ -174,7 +174,10 @@ MEM_STATIC unsigned ZSTD_NbCommonBytes(size_t val)
 MEM_STATIC unsigned ZSTD_highbit32(U32 val)   /* compress, dictBuilder, decodeCorpus */
 {
     assert(val != 0);
-    return 31 - ZSTD_countLeadingZeros32(val);
+    /* For nonzero inputs clz is in [0,31], so xor and subtraction are
+     * equivalent. Xor also lets compilers cancel the clz-to-bsr adjustment
+     * on targets without a native leading-zero-count instruction. */
+    return 31 ^ ZSTD_countLeadingZeros32(val);
 }
 
 /* ZSTD_rotateRight_*():

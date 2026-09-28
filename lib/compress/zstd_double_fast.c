@@ -155,7 +155,7 @@ size_t ZSTD_compressBlock_doubleFast_noDict_generic(
     U32 curr;
 
     /* how many positions to search before increasing step size */
-    const size_t kStepIncr = (size_t)1 << (tuned ? 6 : kSearchStrength);
+    const size_t kStepIncr = (size_t)1 << (tuned ? 7 : kSearchStrength);
     /* the position at which to increment the step size if no match is found */
     const BYTE* nextStep;
     size_t step; /* the current step size */
@@ -249,8 +249,10 @@ size_t ZSTD_compressBlock_doubleFast_noDict_generic(
                      * any increase in the offset's encoding cost. A byte that
                      * can be caught up backwards both extends the match and
                      * removes a literal, so credit it twice in this estimate.
-                     * On text, avoid searching again after a long match. */
-                    if (tuned && (swapTables || mLength <= 24)) {
+                     * Avoid recounting long candidates when the existing
+                     * match is already long. Binary data benefits from a
+                     * tighter limit than text. */
+                    if (tuned && (mLength <= (swapTables ? 16 : 32))) {
                         idxl1 = hashLong[hl1];
                         matchl1 = base + idxl1;
                         if (idxl1 > prefixLowestIndex && MEM_read64(matchl1) == MEM_read64(ip1)) {
