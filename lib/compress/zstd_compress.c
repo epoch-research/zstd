@@ -6676,7 +6676,7 @@ static size_t ZSTD_CCtx_init_compressStream2(ZSTD_CCtx* cctx,
             text += (c >= 32 && c < 127) || c == 9 || c == 10 || c == 13;
             ++count;
         }
-        if (text*4 < count*3) params.maxBlockSize = 96 KB;
+        if (text*4 < count*3) params.maxBlockSize = 80 KB;
     }
     params.maxBlockSize = ZSTD_resolveMaxBlockSize(params.maxBlockSize);
     params.searchForExternalRepcodes = ZSTD_resolveExternalRepcodeSearch(params.searchForExternalRepcodes, params.compressionLevel);
