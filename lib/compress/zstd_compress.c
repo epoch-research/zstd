@@ -4317,13 +4317,20 @@ static const U16 ZSTD_splitSeqLog[129] = {
 static size_t ZSTD_deriveBlockSplits_hist(ZSTD_CCtx* zc, U32 partitions[], U32 nbSeq)
 {
     unsigned* const front = (unsigned*)zc->tmpWorkspace;
-    unsigned* const back = front + 96;
+    unsigned* const back = front + 128;
     SeqDef const* const seq = zc->seqStore.sequencesStart;
     U32 const quarter = nbSeq/4;
     U32 i, diff=0;
     partitions[0] = nbSeq;
     if (nbSeq < 1024) return 0;
-    ZSTD_memset(front, 0, 192*sizeof(unsigned));
+    /* Keep the three alphabets disjoint: literal lengths, match lengths,
+     * and offset codes. The sampled offsets also help locate transitions
+     * whose length distributions alone give an ambiguous boundary. */
+    ZSTD_STATIC_ASSERT(MaxLL < 40);
+    ZSTD_STATIC_ASSERT(40 + MaxML < 96);
+    ZSTD_STATIC_ASSERT(96 + MaxOff < 128);
+    assert(zc->tmpWkspSize >= 256*sizeof(unsigned));
+    ZSTD_memset(front, 0, 256*sizeof(unsigned));
     for (i=0; i<128; ++i) {
         U32 const pos = (i*quarter)>>7;
         SeqDef const a = seq[pos];
@@ -4332,9 +4339,11 @@ static size_t ZSTD_deriveBlockSplits_hist(ZSTD_CCtx* zc, U32 partitions[], U32 n
         ++front[40+ZSTD_MLcode(a.mlBase)];
         ++back[ZSTD_LLcode(b.litLength)];
         ++back[40+ZSTD_MLcode(b.mlBase)];
+        ++front[96+ZSTD_highbit32(a.offBase)];
+        ++back[96+ZSTD_highbit32(b.offBase)];
     }
-    for (i=0; i<96; ++i) diff += front[i]>back[i] ? front[i]-back[i] : back[i]-front[i];
-    if (diff < 160) return 0;
+    for (i=0; i<128; ++i) diff += front[i]>back[i] ? front[i]-back[i] : back[i]-front[i];
+    if (diff < 224) return 0;
     partitions[0] = nbSeq/2;
     {
         /* Reuse the front histogram for signed log-likelihood ratios.
@@ -4346,11 +4355,13 @@ static size_t ZSTD_deriveBlockSplits_hist(ZSTD_CCtx* zc, U32 partitions[], U32 n
         U32 const span = nbSeq-2*start;
         int score=0, minimum=0, original=0;
         U32 best=0;
-        for (i=0; i<96; ++i) prices[i] = (S32)ZSTD_splitSeqLog[back[i]] - (S32)ZSTD_splitSeqLog[front[i]];
+        for (i=0; i<128; ++i) prices[i] = (S32)ZSTD_splitSeqLog[back[i]] - (S32)ZSTD_splitSeqLog[front[i]];
         for (i=0; i<64; ++i) {
             U32 const pos = start + ((2*i+1)*span)/(2*64);
             SeqDef const a = seq[pos];
-            score += prices[ZSTD_LLcode(a.litLength)] + prices[40+ZSTD_MLcode(a.mlBase)];
+            score += prices[ZSTD_LLcode(a.litLength)]
+                   + prices[40+ZSTD_MLcode(a.mlBase)]
+                   + prices[96+ZSTD_highbit32(a.offBase)];
             if (score<minimum) { minimum=score; best=i+1; }
             if (i+1==64/2) original=score;
         }
