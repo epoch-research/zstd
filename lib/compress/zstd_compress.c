@@ -4380,15 +4380,17 @@ static size_t ZSTD_deriveBlockSplits_hist(ZSTD_CCtx* zc, U32 partitions[], U32 n
     return 1;
 }
 
-/* Reject stationary blocks with a small sample of clipped lengths before
- * building histograms. The histogram test then rejects changes that are
+/* Reject stationary blocks with a small sample of clipped lengths and
+ * repeat codes before building histograms. Capping offBase at four keeps
+ * the three repeat codes distinct and groups all explicit offsets together.
+ * The histogram test then rejects changes that are
  * too small to justify another entropy header. At most one split is made. */
 static size_t ZSTD_deriveBlockSplits_fast(ZSTD_CCtx* zc, U32 partitions[], U32 nbSeq)
 {
     SeqDef const* const seq = zc->seqStore.sequencesStart;
     U32 const quarter = nbSeq/4;
     U32 i;
-    int ml=0, ll=0;
+    int ml=0, ll=0, of=0;
     partitions[0] = nbSeq;
     if (nbSeq < 1024) return 0;
     for (i=0; i<32; ++i) {
@@ -4397,10 +4399,12 @@ static size_t ZSTD_deriveBlockSplits_fast(ZSTD_CCtx* zc, U32 partitions[], U32 n
         SeqDef const b = seq[nbSeq-quarter+pos];
         ml += (int)MIN(a.mlBase,32) - (int)MIN(b.mlBase,32);
         ll += (int)MIN(a.litLength,16) - (int)MIN(b.litLength,16);
+        of += (int)MIN(a.offBase,4) - (int)MIN(b.offBase,4);
     }
     if (ml<0) ml=-ml;
     if (ll<0) ll=-ll;
-    if (ml+ll < 32) return 0;
+    if (of<0) of=-of;
+    if (ml+ll+of < 32) return 0;
     return ZSTD_deriveBlockSplits_hist(zc,partitions,nbSeq);
 }
 
