@@ -4300,6 +4300,20 @@ ZSTD_deriveBlockSplitsHelper(seqStoreSplits* splits, size_t startIdx, size_t end
  * 40 literal-length bins and 56 match-length bins include the complete
  * alphabets, rounded for simple vectorization. No extra allocation is
  * needed: the histograms occupy the existing entropy scratch space. */
+/* round(256*log2(count+1)), count in [0,128]. One-count smoothing keeps
+ * likelihoods finite for symbols absent from a sampled quarter. */
+static const U16 ZSTD_splitSeqLog[129] = {
+    0, 256, 406, 512, 594, 662, 719, 768, 812, 850, 886, 918, 947, 975, 1000, 1024,
+    1046, 1068, 1087, 1106, 1124, 1142, 1158, 1174, 1189, 1203, 1217, 1231, 1244, 1256, 1268, 1280,
+    1291, 1302, 1313, 1324, 1334, 1343, 1353, 1362, 1372, 1380, 1389, 1398, 1406, 1414, 1422, 1430,
+    1437, 1445, 1452, 1459, 1466, 1473, 1480, 1487, 1493, 1500, 1506, 1512, 1518, 1524, 1530, 1536,
+    1542, 1547, 1553, 1558, 1564, 1569, 1574, 1580, 1585, 1590, 1595, 1599, 1604, 1609, 1614, 1618,
+    1623, 1628, 1632, 1636, 1641, 1645, 1649, 1654, 1658, 1662, 1666, 1670, 1674, 1678, 1682, 1686,
+    1690, 1693, 1697, 1701, 1705, 1708, 1712, 1715, 1719, 1722, 1726, 1729, 1733, 1736, 1739, 1743,
+    1746, 1749, 1752, 1756, 1759, 1762, 1765, 1768, 1771, 1774, 1777, 1780, 1783, 1786, 1789, 1792,
+    1795,
+};
+
 static size_t ZSTD_deriveBlockSplits_hist(ZSTD_CCtx* zc, U32 partitions[], U32 nbSeq)
 {
     unsigned* const front = (unsigned*)zc->tmpWorkspace;
@@ -4322,6 +4336,29 @@ static size_t ZSTD_deriveBlockSplits_hist(ZSTD_CCtx* zc, U32 partitions[], U32 n
     for (i=0; i<96; ++i) diff += front[i]>back[i] ? front[i]-back[i] : back[i]-front[i];
     if (diff < 192) return 0;
     partitions[0] = nbSeq/2;
+    {
+        /* Reuse the front histogram for signed log-likelihood ratios.
+         * A negative price favors the front model. The minimum cumulative
+         * price identifies the transition to the back model. Only refine
+         * the middle three quarters, keeping both partitions nonempty. */
+        S32* const prices = (S32*)front;
+        U32 const start = nbSeq/8;
+        U32 const span = nbSeq-2*start;
+        int score=0, minimum=0, original=0;
+        U32 best=0;
+        for (i=0; i<96; ++i) prices[i] = (S32)ZSTD_splitSeqLog[back[i]] - (S32)ZSTD_splitSeqLog[front[i]];
+        for (i=0; i<64; ++i) {
+            U32 const pos = start + ((2*i+1)*span)/(2*64);
+            SeqDef const a = seq[pos];
+            score += prices[ZSTD_LLcode(a.litLength)] + prices[40+ZSTD_MLcode(a.mlBase)];
+            if (score<minimum) { minimum=score; best=i+1; }
+            if (i+1==64/2) original=score;
+        }
+        /* Require improvement over the midpoint and supporting evidence
+         * after the proposed boundary, rather than moving on sample noise. */
+        if (original-minimum >= 4*256 && score-minimum >= 8*256)
+            partitions[0] = start + (best*span)/64;
+    }
     partitions[1] = nbSeq;
     return 1;
 }
