@@ -341,7 +341,7 @@ size_t ZSTD_compressBlock_doubleFast_noDict_generic(
                  * not the repeat's start ip+1. Bound this extra lookup to
                  * short repeats and require enough extra matched bytes to
                  * pay for a normal offset. ip+1 <= ip1 <= ilimit here. */
-                if (tagged && mLength <= 8) {
+                if (tagged && mLength <= 16) {
                     const BYTE* const rp = ip+1;
                     size_t const rh = ZSTD_hashPtr(rp, hBitsL+ZSTD_DFAST_TAG_BITS, 8);
                     U32 const ri = ZSTD_dfastLoadLong(hashLong, rh, tagged);
