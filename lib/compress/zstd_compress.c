@@ -5018,7 +5018,7 @@ static size_t ZSTD_compress_frameChunk(ZSTD_CCtx* cctx,
             for (i=0; i<srcSize; i+=stride) {
                 U32 const c = p[i];
                 text += (c>=32 && c<127) || c==9 || c==10 || c==13;
-                syntax += c=='_';
+                syntax += c == '_';
                 ++samples;
             }
             if (text*8 >= samples*7 && syntax*128 >= samples)
@@ -6723,8 +6723,9 @@ static size_t ZSTD_CCtx_init_compressStream2(ZSTD_CCtx* cctx,
     params.ldmParams.enableLdm = ZSTD_resolveEnableLdm(params.ldmParams.enableLdm, &params.cParams);
     params.useRowMatchFinder = ZSTD_resolveRowMatchFinderMode(params.useRowMatchFinder, &params.cParams);
     params.validateSequences = ZSTD_resolveExternalSequenceValidation(params.validateSequences);
-    /* For complete binary inputs, a smaller block working set reduces
-     * workspace demand without shortening the match window. Sample only
+    /* For complete binary or identifier-heavy text inputs, a smaller block
+     * working set reduces workspace demand without shortening the match
+     * window. Keep the text reduction modest to limit header costs. Sample only
      * when this call exposes the whole input: deferred stable input and
      * externally supplied sequences keep their original block policy.
      * Explicit block limits, dictionaries and LDM are left unchanged. */
@@ -6738,13 +6739,15 @@ static size_t ZSTD_CCtx_init_compressStream2(ZSTD_CCtx* cctx,
         const BYTE* const sample = (const BYTE*)sampleSrc;
         size_t const sampleSize = MIN(sampleSrcSize, 128 KB);
         size_t const stride = (sampleSize / 2048) | 1;
-        size_t i, count = 0, text = 0;
+        size_t i, count = 0, text = 0, syntax = 0;
         for (i = 0; i < sampleSize; i += stride) {
             U32 const c = sample[i];
             text += (c >= 32 && c < 127) || c == 9 || c == 10 || c == 13;
+            syntax += c=='_';
             ++count;
         }
         if (text*4 < count*3) params.maxBlockSize = 96 KB;
+        else if (syntax*64 >= count) params.maxBlockSize = 124 KB;
     }
     params.maxBlockSize = ZSTD_resolveMaxBlockSize(params.maxBlockSize);
     params.searchForExternalRepcodes = ZSTD_resolveExternalRepcodeSearch(params.searchForExternalRepcodes, params.compressionLevel);
